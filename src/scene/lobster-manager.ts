@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import {
   createLobster,
+  resetLobsterPose,
   animateIdle,
   animateWalk,
   animateClawSnap,
@@ -8,8 +9,18 @@ import {
   animateDance,
   animateBackflip,
   animateSpin,
+  animateStrike,
+  animateFeint,
+  animateGuard,
+  animateCombatReady,
+  animateApproach,
+  animateRetreat,
+  animateStunned,
+  animateVictory,
+  animateDefeated,
 } from "./lobster.js";
 import type { AgentProfile, AgentPosition } from "../../server/types.js";
+import type { ParticleEngine } from "./particle-engine.js";
 
 interface LobsterEntry {
   group: THREE.Group;
@@ -17,6 +28,8 @@ interface LobsterEntry {
   current: AgentPosition;
   target: AgentPosition;
   action: string;
+  transientAction: string | null;
+  transientUntil: number;
   time: number;
   inCombat: boolean;
   combatRing: THREE.Mesh;
@@ -34,22 +47,6 @@ interface Obstacle {
   radius: number;
 }
 
-interface WorldParticle {
-  mesh: THREE.Mesh;
-  velocity: THREE.Vector3;
-  life: number;
-  maxLife: number;
-  drag: number;
-  gravity: number;
-}
-
-interface RingPulse {
-  mesh: THREE.Mesh;
-  life: number;
-  maxLife: number;
-  growSpeed: number;
-}
-
 const LOBSTER_RADIUS = 1.8;
 const AVOIDANCE_LOOKAHEAD = 4;
 const AVOIDANCE_FORCE = 6;
@@ -60,15 +57,12 @@ export class LobsterManager {
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private obstacles: Obstacle[] = [];
-  private particles: WorldParticle[] = [];
-  private ringPulses: RingPulse[] = [];
-  private particleGeometry = new THREE.IcosahedronGeometry(0.11, 0);
-  private trailGeometry = new THREE.SphereGeometry(0.08, 8, 6);
-  private ringGeometry = new THREE.RingGeometry(0.5, 0.68, 28);
+  private particles: ParticleEngine | null;
 
-  constructor(scene: THREE.Scene, obstacles?: Obstacle[]) {
+  constructor(scene: THREE.Scene, obstacles?: Obstacle[], particles?: ParticleEngine) {
     this.scene = scene;
     this.obstacles = obstacles ?? [];
+    this.particles = particles ?? null;
   }
 
   /** Append additional obstacles (e.g. from async terrain loading). */
@@ -119,6 +113,8 @@ export class LobsterManager {
         current: { ...position },
         target: { ...position },
         action: "idle",
+        transientAction: null,
+        transientUntil: 0,
         time: 0,
         inCombat: false,
         combatRing,
@@ -153,6 +149,14 @@ export class LobsterManager {
     }
   }
 
+  /** Play a short-lived action without replacing the persistent action state. */
+  triggerAction(agentId: string, action: string, durationMs = 650): void {
+    const entry = this.lobsters.get(agentId);
+    if (!entry || entry.dead) return;
+    entry.transientAction = action;
+    entry.transientUntil = Date.now() + Math.max(120, durationMs);
+  }
+
   setCombatState(agentId: string, inCombat: boolean): void {
     const entry = this.lobsters.get(agentId);
     if (!entry) return;
@@ -167,8 +171,8 @@ export class LobsterManager {
     const entry = this.lobsters.get(agentId);
     if (!entry) return;
     entry.impactPulse = 1;
-    this.spawnHitBurst(entry.group.position, entry.profile.color, 10, 2.7);
-    this.spawnRingPulse(entry.group.position, 0xff9168, 0.42, 3.4);
+    this.particles?.emit("hit", entry.group.position, { color: entry.profile.color });
+    this.particles?.emitRing("hit", entry.group.position);
   }
 
   setDeadState(agentId: string, dead: boolean): void {
@@ -180,8 +184,10 @@ export class LobsterManager {
       entry.combatRing.visible = false;
       entry.combatRingMat.opacity = 0;
       entry.action = "idle";
-      this.spawnHitBurst(entry.group.position, 0xff4d4d, 28, 3.4, 1.1, 0.18);
-      this.spawnRingPulse(entry.group.position, 0xff4d4d, 0.9, 5.2);
+      entry.transientAction = null;
+      entry.transientUntil = 0;
+      this.particles?.emit("death", entry.group.position);
+      this.particles?.emitRing("death", entry.group.position);
     }
   }
 
@@ -261,9 +267,15 @@ export class LobsterManager {
 
   /** Per-frame update: turn to face target, avoid obstacles, then walk */
   update(delta: number): void {
+    const now = Date.now();
     for (const entry of this.lobsters.values()) {
       entry.time += delta;
       entry.impactPulse = Math.max(0, entry.impactPulse - delta * 3.2);
+
+      if (entry.transientAction && now >= entry.transientUntil) {
+        entry.transientAction = null;
+      }
+      const activeAction = entry.transientAction ?? entry.action;
 
       const dx = entry.target.x - entry.current.x;
       const dz = entry.target.z - entry.current.z;
@@ -328,13 +340,14 @@ export class LobsterManager {
 
           entry.current.y += (entry.target.y - entry.current.y) * moveSpeed;
 
-          animateWalk(entry.group, entry.time);
-
           // Small sediment trail when a lobster is actively moving.
           entry.trailTimer -= delta;
           if (entry.trailTimer <= 0) {
             entry.trailTimer = 0.14 + Math.random() * 0.12;
-            this.spawnTrailPuff(entry.group.position, entry.current.rotation, entry.profile.color);
+            this.particles?.emit("trail", entry.group.position, {
+              color: new THREE.Color(entry.profile.color).lerp(new THREE.Color(0xffffff), 0.4),
+              rotation: entry.current.rotation,
+            });
           }
         }
       } else {
@@ -364,7 +377,7 @@ export class LobsterManager {
         entry.combatSparkTimer -= delta;
         if (entry.combatSparkTimer <= 0) {
           entry.combatSparkTimer = 0.09 + Math.random() * 0.06;
-          this.spawnCombatSpark(entry.group.position);
+          this.particles?.emit("spark", entry.group.position);
         }
       } else {
         entry.combatRing.visible = false;
@@ -380,43 +393,114 @@ export class LobsterManager {
         emMat.emissiveIntensity = flash * 0.85;
       }
 
-      // Run action animation when arrived
+      // Always reset the pose first so action switches are clean.
+      resetLobsterPose(entry.group);
+
+      // Run action animation.
       const t = entry.time;
-      if (dist <= arrivedThreshold) {
-        switch (entry.action) {
-          case "walk":
-            animateWalk(entry.group, t);
-            animateIdle(entry.group, t);
+      const moving = dist > arrivedThreshold;
+      const combatReady = entry.inCombat && !entry.dead;
+
+      if (entry.dead) {
+        animateDefeated(entry.group, t);
+        continue;
+      }
+
+      if (entry.transientAction) {
+        switch (activeAction) {
+          case "strike":
+            animateStrike(entry.group, t);
             break;
-          case "talk":
-          case "pinch":
-            animateClawSnap(entry.group, t);
-            animateIdle(entry.group, t);
+          case "feint":
+            animateFeint(entry.group, t);
             break;
-          case "wave":
-            animateWave(entry.group, t);
-            animateIdle(entry.group, t);
+          case "guard":
+            animateGuard(entry.group, t);
             break;
-          case "dance":
-            animateDance(entry.group, t);
+          case "approach":
+            animateApproach(entry.group, t);
             break;
-          case "backflip":
-            animateBackflip(entry.group, t);
+          case "retreat":
+            animateRetreat(entry.group, t);
             break;
-          case "spin":
-            animateSpin(entry.group, t);
+          case "stunned":
+            animateStunned(entry.group, t);
             break;
-          case "idle":
+          case "victory":
+            animateVictory(entry.group, t);
+            break;
           default:
             animateIdle(entry.group, t);
             break;
         }
+
+        if (moving && activeAction !== "guard" && activeAction !== "stunned") {
+          animateWalk(entry.group, t);
+        }
       } else {
-        animateIdle(entry.group, t);
+        if (moving) {
+          animateWalk(entry.group, t);
+          if (activeAction === "approach") animateApproach(entry.group, t);
+          else if (activeAction === "retreat") animateRetreat(entry.group, t);
+          else if (combatReady) animateCombatReady(entry.group, t);
+          else animateIdle(entry.group, t);
+        } else {
+          switch (activeAction) {
+            case "walk":
+              animateWalk(entry.group, t);
+              if (combatReady) animateCombatReady(entry.group, t);
+              else animateIdle(entry.group, t);
+              break;
+            case "talk":
+            case "pinch":
+              animateClawSnap(entry.group, t);
+              animateIdle(entry.group, t);
+              break;
+            case "wave":
+              animateWave(entry.group, t);
+              animateIdle(entry.group, t);
+              break;
+            case "dance":
+              animateDance(entry.group, t);
+              break;
+            case "backflip":
+              animateBackflip(entry.group, t);
+              break;
+            case "spin":
+              animateSpin(entry.group, t);
+              break;
+            case "victory":
+              animateVictory(entry.group, t);
+              break;
+            case "stunned":
+              animateStunned(entry.group, t);
+              break;
+            case "strike":
+              animateStrike(entry.group, t);
+              break;
+            case "feint":
+              animateFeint(entry.group, t);
+              break;
+            case "guard":
+              animateGuard(entry.group, t);
+              break;
+            case "approach":
+              animateApproach(entry.group, t);
+              break;
+            case "retreat":
+              animateRetreat(entry.group, t);
+              break;
+            case "idle":
+            default:
+              if (combatReady) animateCombatReady(entry.group, t);
+              else animateIdle(entry.group, t);
+              break;
+          }
+        }
       }
     }
 
-    this.updateParticles(delta);
+    this.particles?.update(delta);
 
     // Animate room particles
     const animateFn = this.scene.userData.animateParticles as
@@ -486,163 +570,4 @@ export class LobsterManager {
     return Array.from(this.lobsters.keys());
   }
 
-  private spawnTrailPuff(position: THREE.Vector3, rotation: number, color: string): void {
-    const mat = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color).lerp(new THREE.Color(0xffffff), 0.4),
-      transparent: true,
-      opacity: 0.22,
-      depthWrite: false,
-    });
-    const mesh = new THREE.Mesh(this.trailGeometry, mat);
-
-    const backward = new THREE.Vector3(Math.sin(rotation + Math.PI), 0, Math.cos(rotation + Math.PI));
-    const side = new THREE.Vector3(-backward.z, 0, backward.x).multiplyScalar((Math.random() - 0.5) * 0.55);
-    mesh.position.copy(position).add(backward.multiplyScalar(0.9)).add(side);
-    mesh.position.y = 0.16 + Math.random() * 0.12;
-    this.scene.add(mesh);
-
-    const vel = new THREE.Vector3((Math.random() - 0.5) * 0.35, 0.42 + Math.random() * 0.2, (Math.random() - 0.5) * 0.35);
-    this.particles.push({
-      mesh,
-      velocity: vel,
-      life: 0.58,
-      maxLife: 0.58,
-      drag: 0.9,
-      gravity: 1.1,
-    });
-  }
-
-  private spawnHitBurst(
-    position: THREE.Vector3,
-    color: string | number,
-    count: number,
-    speed: number,
-    life = 0.7,
-    scale = 0.14,
-  ): void {
-    for (let i = 0; i < count; i++) {
-      const mat = new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.88,
-        depthWrite: false,
-      });
-      const mesh = new THREE.Mesh(this.particleGeometry, mat);
-      mesh.scale.setScalar(scale * (0.8 + Math.random() * 0.65));
-      mesh.position.copy(position);
-      mesh.position.y += 0.75 + Math.random() * 0.7;
-      this.scene.add(mesh);
-
-      const vel = new THREE.Vector3(
-        (Math.random() - 0.5) * speed,
-        0.8 + Math.random() * speed * 0.45,
-        (Math.random() - 0.5) * speed,
-      );
-
-      this.particles.push({
-        mesh,
-        velocity: vel,
-        life,
-        maxLife: life,
-        drag: 0.84,
-        gravity: 4.2,
-      });
-    }
-  }
-
-  private spawnCombatSpark(position: THREE.Vector3): void {
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffa347,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: false,
-    });
-    const mesh = new THREE.Mesh(this.particleGeometry, mat);
-    mesh.scale.setScalar(0.115 + Math.random() * 0.055);
-
-    const angle = Math.random() * Math.PI * 2;
-    const radius = 0.9 + Math.random() * 0.75;
-    mesh.position.set(
-      position.x + Math.cos(angle) * radius,
-      0.45 + Math.random() * 0.65,
-      position.z + Math.sin(angle) * radius,
-    );
-    this.scene.add(mesh);
-
-    const vel = new THREE.Vector3(
-      (Math.random() - 0.5) * 0.55,
-      0.95 + Math.random() * 0.5,
-      (Math.random() - 0.5) * 0.55,
-    );
-
-    this.particles.push({
-      mesh,
-      velocity: vel,
-      life: 0.45,
-      maxLife: 0.45,
-      drag: 0.86,
-      gravity: 3.1,
-    });
-  }
-
-  private spawnRingPulse(position: THREE.Vector3, color: number, life = 0.45, growSpeed = 3.8): void {
-    const mat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.45,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    const mesh = new THREE.Mesh(this.ringGeometry, mat);
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(position.x, 0.08, position.z);
-    mesh.scale.setScalar(0.65);
-    this.scene.add(mesh);
-
-    this.ringPulses.push({
-      mesh,
-      life,
-      maxLife: life,
-      growSpeed,
-    });
-  }
-
-  private updateParticles(delta: number): void {
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.life -= delta;
-
-      if (p.life <= 0) {
-        this.scene.remove(p.mesh);
-        (p.mesh.material as THREE.Material).dispose();
-        this.particles.splice(i, 1);
-        continue;
-      }
-
-      p.velocity.y -= p.gravity * delta;
-      const drag = Math.pow(p.drag, delta * 60);
-      p.velocity.multiplyScalar(drag);
-      p.mesh.position.addScaledVector(p.velocity, delta);
-      p.mesh.scale.multiplyScalar(0.986);
-
-      const mat = p.mesh.material as THREE.MeshBasicMaterial;
-      mat.opacity = Math.max(0, 0.9 * (p.life / p.maxLife));
-    }
-
-    for (let i = this.ringPulses.length - 1; i >= 0; i--) {
-      const ring = this.ringPulses[i];
-      ring.life -= delta;
-
-      if (ring.life <= 0) {
-        this.scene.remove(ring.mesh);
-        (ring.mesh.material as THREE.Material).dispose();
-        this.ringPulses.splice(i, 1);
-        continue;
-      }
-
-      ring.mesh.scale.addScalar(delta * ring.growSpeed);
-      const mat = ring.mesh.material as THREE.MeshBasicMaterial;
-      mat.opacity = 0.5 * (ring.life / ring.maxLife);
-    }
-  }
 }

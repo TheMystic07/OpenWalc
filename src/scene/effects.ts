@@ -37,6 +37,13 @@ interface IntentEntry {
   expiresAt: number;
 }
 
+interface CombatStaminaEntry {
+  object: CSS2DObject;
+  agentId: string;
+  fillEl: HTMLDivElement;
+  valueEl: HTMLSpanElement;
+}
+
 interface DamageEntry {
   id: number;
   object: CSS2DObject;
@@ -81,6 +88,7 @@ export class EffectsManager {
   private emotes = new Map<string, EmoteEntry>();
   private combatIndicators = new Map<string, CombatIndicatorEntry>();
   private combatHpBars = new Map<string, CombatHpEntry>();
+  private combatStaminaBars = new Map<string, CombatStaminaEntry>();
   private intents = new Map<string, IntentEntry>();
   private damages = new Map<number, DamageEntry>();
   private nextDamageId = 1;
@@ -110,7 +118,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(0, 2.8, 0);
+    obj.position.set(this.getOverlayOffset(agentId, 1.05), 2.95, 0);
     obj.name = `label_${agentId}`;
 
     entry = { object: obj, agentId };
@@ -137,7 +145,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(0, 3.6, 0);
+    obj.position.set(this.getOverlayOffset(agentId, 1.25), 5.25, 0);
     obj.name = `bubble_${agentId}`;
 
     const entry: BubbleEntry = {
@@ -181,7 +189,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 0.72), 4.4, 0);
+    obj.position.set(this.getOverlayOffset(agentId, 1.1), 5.05, 0);
     obj.name = `combat_${agentId}`;
     this.combatIndicators.set(agentId, { object: obj, agentId });
     this.attachToAgent(agentId, obj);
@@ -218,7 +226,7 @@ export class EffectsManager {
       deferShow(el);
 
       const obj = new CSS2DObject(el);
-      obj.position.set(this.getOverlayOffset(agentId, 0.72), 3.95, 0);
+      obj.position.set(this.getOverlayOffset(agentId, 0.95), 3.85, 0);
       obj.name = `combat_hp_${agentId}`;
 
       entry = { object: obj, agentId, fillEl, valueEl };
@@ -231,6 +239,136 @@ export class EffectsManager {
     entry.valueEl.textContent = `${hpValue} HP`;
     entry.fillEl.style.width = `${hpValue}%`;
     entry.fillEl.classList.toggle("combat-hp-fill-low", hpValue <= 30);
+  }
+
+  /** Stamina bar below HP bar for agents in combat */
+  setCombatStamina(agentId: string, stamina: number | null): void {
+    if (stamina == null) {
+      const existing = this.combatStaminaBars.get(agentId);
+      if (existing) {
+        disposeCSS2D(existing.object);
+        this.combatStaminaBars.delete(agentId);
+      }
+      return;
+    }
+
+    const staminaValue = Math.max(0, Math.min(100, Math.round(stamina)));
+    let entry = this.combatStaminaBars.get(agentId);
+    if (!entry) {
+      const el = document.createElement("div");
+      el.className = "combat-stamina";
+
+      const valueEl = document.createElement("span");
+      valueEl.className = "combat-stamina-value";
+      el.appendChild(valueEl);
+
+      const trackEl = document.createElement("div");
+      trackEl.className = "combat-stamina-track";
+      const fillEl = document.createElement("div");
+      fillEl.className = "combat-stamina-fill";
+      trackEl.appendChild(fillEl);
+      el.appendChild(trackEl);
+
+      deferShow(el);
+
+      const obj = new CSS2DObject(el);
+      obj.position.set(this.getOverlayOffset(agentId, 0.95), 3.5, 0);
+      obj.name = `combat_stamina_${agentId}`;
+
+      entry = { object: obj, agentId, fillEl, valueEl };
+      this.combatStaminaBars.set(agentId, entry);
+    }
+
+    this.attachToAgent(agentId, entry.object);
+
+    entry.valueEl.textContent = `${staminaValue} SP`;
+    entry.fillEl.style.width = `${staminaValue}%`;
+    entry.fillEl.classList.toggle("combat-stamina-fill-low", staminaValue <= 20);
+  }
+
+  /** Floating "READ!" text when momentum bonus triggers */
+  showReadBonus(agentId: string): void {
+    const el = document.createElement("div");
+    el.className = "damage-pop damage-pop-read";
+    el.textContent = "READ!";
+    deferShow(el);
+
+    const obj = new CSS2DObject(el);
+    const offset = this.getOverlayOffset(agentId, 1.05);
+    obj.position.set(offset + (Math.random() - 0.5) * 0.3, 4.8 + Math.random() * 0.3, 0);
+    obj.name = `read_${agentId}_${this.nextDamageId}`;
+
+    const id = this.nextDamageId++;
+    this.damages.set(id, {
+      id,
+      object: obj,
+      agentId,
+      expiresAt: Date.now() + 1200,
+    });
+    this.attachToAgent(agentId, obj);
+  }
+
+  /** "TIMEOUT" warning marker above agent who was auto-guarded */
+  showTimeout(agentId: string): void {
+    const el = document.createElement("div");
+    el.className = "damage-pop damage-pop-timeout";
+    el.textContent = "TIMEOUT";
+    deferShow(el);
+
+    const obj = new CSS2DObject(el);
+    obj.position.set(this.getOverlayOffset(agentId, 1.05), 5.35, 0);
+    obj.name = `timeout_${agentId}_${this.nextDamageId}`;
+
+    const id = this.nextDamageId++;
+    this.damages.set(id, {
+      id,
+      object: obj,
+      agentId,
+      expiresAt: Date.now() + 1400,
+    });
+    this.attachToAgent(agentId, obj);
+  }
+
+  /** "FLED" popup when an agent escapes battle */
+  showFlee(agentId: string): void {
+    const el = document.createElement("div");
+    el.className = "damage-pop damage-pop-flee";
+    el.textContent = "FLED!";
+    deferShow(el);
+
+    const obj = new CSS2DObject(el);
+    obj.position.set(this.getOverlayOffset(agentId, 1.05), 5.1, 0);
+    obj.name = `flee_${agentId}_${this.nextDamageId}`;
+
+    const id = this.nextDamageId++;
+    this.damages.set(id, {
+      id,
+      object: obj,
+      agentId,
+      expiresAt: Date.now() + 1400,
+    });
+    this.attachToAgent(agentId, obj);
+  }
+
+  /** "TRUCE" popup when both agents agree to peace */
+  showTruce(agentId: string): void {
+    const el = document.createElement("div");
+    el.className = "damage-pop damage-pop-truce";
+    el.textContent = "TRUCE";
+    deferShow(el);
+
+    const obj = new CSS2DObject(el);
+    obj.position.set(this.getOverlayOffset(agentId, 1.05), 5.1, 0);
+    obj.name = `truce_${agentId}_${this.nextDamageId}`;
+
+    const id = this.nextDamageId++;
+    this.damages.set(id, {
+      id,
+      object: obj,
+      agentId,
+      expiresAt: Date.now() + 1800,
+    });
+    this.attachToAgent(agentId, obj);
   }
 
   /** Short-lived intent chip above an agent for current combat turn. */
@@ -254,7 +392,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 0.72), 4.65, 0);
+    obj.position.set(this.getOverlayOffset(agentId, 1.0), 4.55, 0);
     obj.name = `intent_${agentId}_${this.nextDamageId++}`;
 
     this.intents.set(agentId, {
@@ -274,8 +412,8 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    const offset = this.getOverlayOffset(agentId, 0.72);
-    obj.position.set(offset + (Math.random() - 0.5) * 0.45, 3.7 + Math.random() * 0.4, 0);
+    const offset = this.getOverlayOffset(agentId, 1.05);
+    obj.position.set(offset + (Math.random() - 0.5) * 0.45, 4.15 + Math.random() * 0.4, 0);
     obj.name = `dmg_${agentId}_${this.nextDamageId}`;
 
     const id = this.nextDamageId++;
@@ -296,7 +434,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 0.72), 4.0, 0);
+    obj.position.set(this.getOverlayOffset(agentId, 1.05), 4.45, 0);
     obj.name = `ko_${agentId}_${this.nextDamageId}`;
 
     const id = this.nextDamageId++;
@@ -330,7 +468,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(0.5, 3.2, 0);
+    obj.position.set(this.getOverlayOffset(agentId, 1.25), 5.72, 0);
     obj.name = `emote_${agentId}`;
 
     const entry: EmoteEntry = {
@@ -363,6 +501,12 @@ export class EffectsManager {
     if (hp) {
       disposeCSS2D(hp.object);
       this.combatHpBars.delete(agentId);
+    }
+
+    const stamina = this.combatStaminaBars.get(agentId);
+    if (stamina) {
+      disposeCSS2D(stamina.object);
+      this.combatStaminaBars.delete(agentId);
     }
 
     const intent = this.intents.get(agentId);

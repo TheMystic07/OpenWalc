@@ -320,3 +320,236 @@ export function animateSpin(group: THREE.Group, time: number): void {
     }
   });
 }
+
+/** Restore limb/claw pose so switching animations does not accumulate offsets. */
+export function resetLobsterPose(group: THREE.Group): void {
+  group.rotation.x = 0;
+  group.rotation.z = 0;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.x = 0;
+    leftClaw.rotation.z = 0;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.x = 0;
+    rightClaw.rotation.z = 0;
+  }
+
+  group.children.forEach((child) => {
+    if (!child.name.startsWith("leg_")) return;
+    const idx = parseInt(child.name.split("_")[2], 10);
+    const side = child.name.includes("_l_") ? -1 : 1;
+    const baseZ = side * 0.8;
+    const baseX = -0.1 + idx * 0.05;
+    child.rotation.x = baseX;
+    child.rotation.z = baseZ;
+  });
+}
+
+/** Aggressive forward claw combo used for strike intent. */
+export function animateStrike(group: THREE.Group, time: number): void {
+  const phase = Math.sin(time * 16) * 0.5 + 0.5;
+  const lunge = phase * 0.45;
+  group.rotation.x = -0.12 - lunge * 0.25;
+  group.position.y += 0.05 + Math.sin(time * 20) * 0.01;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.z = 0.32 + lunge * 0.35;
+    leftClaw.rotation.x = -0.5 + lunge * 1.2;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -0.32 - lunge * 0.35;
+    rightClaw.rotation.x = -0.5 + lunge * 1.2;
+  }
+
+  group.children.forEach((child) => {
+    if (!child.name.startsWith("leg_")) return;
+    const idx = parseInt(child.name.split("_")[2], 10);
+    const side = child.name.includes("_l_") ? -1 : 1;
+    const phaseOffset = idx * 0.8;
+    const baseZ = side * 0.8;
+    child.rotation.x = -0.25 + Math.sin(time * 14 + phaseOffset) * 0.2;
+    child.rotation.z = baseZ + Math.sin(time * 10 + phaseOffset) * 0.06;
+  });
+}
+
+/** Fake-out shoulder roll with asymmetric claw rhythm. */
+export function animateFeint(group: THREE.Group, time: number): void {
+  group.rotation.z = Math.sin(time * 14) * 0.17;
+  group.rotation.x = -0.04;
+  group.position.y += 0.02;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  const fakeA = Math.sin(time * 18) * 0.45;
+  const fakeB = Math.sin(time * 18 + Math.PI * 0.6) * 0.45;
+  if (leftClaw) {
+    leftClaw.rotation.z = 0.35 + fakeA * 0.4;
+    leftClaw.rotation.x = -0.15 + fakeA * 0.7;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -0.35 - fakeB * 0.4;
+    rightClaw.rotation.x = -0.15 + fakeB * 0.7;
+  }
+}
+
+/** Defensive crouch with crossed claws and tight leg stance. */
+export function animateGuard(group: THREE.Group, time: number): void {
+  group.rotation.x = -0.1;
+  group.position.y -= 0.03;
+  group.rotation.z = Math.sin(time * 6) * 0.04;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.z = 0.95;
+    leftClaw.rotation.x = 0.32;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -0.95;
+    rightClaw.rotation.x = 0.32;
+  }
+
+  group.children.forEach((child) => {
+    if (!child.name.startsWith("leg_")) return;
+    const idx = parseInt(child.name.split("_")[2], 10);
+    const side = child.name.includes("_l_") ? -1 : 1;
+    const baseZ = side * 0.8;
+    child.rotation.x = -0.24 + idx * 0.03;
+    child.rotation.z = baseZ;
+  });
+}
+
+/** Ready stance while actively in combat between turns. */
+export function animateCombatReady(group: THREE.Group, time: number): void {
+  group.rotation.x = -0.06;
+  group.rotation.z = Math.sin(time * 5) * 0.04;
+  group.position.y += Math.sin(time * 7) * 0.01;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  const clawPulse = Math.sin(time * 10) * 0.08;
+  if (leftClaw) {
+    leftClaw.rotation.z = 0.42 + clawPulse;
+    leftClaw.rotation.x = -0.18 + Math.sin(time * 8) * 0.12;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -0.42 - clawPulse;
+    rightClaw.rotation.x = -0.18 + Math.sin(time * 8 + Math.PI) * 0.12;
+  }
+
+  group.children.forEach((child) => {
+    if (!child.name.startsWith("leg_")) return;
+    const idx = parseInt(child.name.split("_")[2], 10);
+    const side = child.name.includes("_l_") ? -1 : 1;
+    const phase = idx * 0.65;
+    const baseZ = side * 0.8;
+    child.rotation.x = -0.16 + Math.sin(time * 9 + phase) * 0.18;
+    child.rotation.z = baseZ + Math.sin(time * 6 + phase) * 0.04;
+  });
+}
+
+/** Low stalking advance used for approach intent. */
+export function animateApproach(group: THREE.Group, time: number): void {
+  group.rotation.x = -0.08;
+  group.position.y += Math.sin(time * 8) * 0.012;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.z = 0.2 + Math.sin(time * 8) * 0.08;
+    leftClaw.rotation.x = -0.22;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -0.2 - Math.sin(time * 8 + Math.PI) * 0.08;
+    rightClaw.rotation.x = -0.22;
+  }
+
+  group.children.forEach((child) => {
+    if (!child.name.startsWith("leg_")) return;
+    const idx = parseInt(child.name.split("_")[2], 10);
+    const phase = idx * 0.9;
+    child.rotation.x = Math.sin(time * 10 + phase) * 0.34;
+  });
+}
+
+/** Backward tail-kick posture for retreat intent. */
+export function animateRetreat(group: THREE.Group, time: number): void {
+  group.rotation.x = 0.1;
+  group.position.y += Math.sin(time * 13) * 0.016;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.z = 0.14;
+    leftClaw.rotation.x = -0.5;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -0.14;
+    rightClaw.rotation.x = -0.5;
+  }
+
+  group.children.forEach((child) => {
+    if (!child.name.startsWith("leg_")) return;
+    const idx = parseInt(child.name.split("_")[2], 10);
+    const phase = idx * 0.8;
+    child.rotation.x = -0.22 + Math.sin(time * 12 + phase) * 0.22;
+  });
+}
+
+/** Short wobble when the lobster is hit. */
+export function animateStunned(group: THREE.Group, time: number): void {
+  group.rotation.z = Math.sin(time * 24) * 0.22;
+  group.rotation.x = -0.05 + Math.sin(time * 18) * 0.06;
+  group.position.y += Math.sin(time * 16) * 0.016;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.x = -0.35;
+    leftClaw.rotation.z = 0.22;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.x = -0.35;
+    rightClaw.rotation.z = -0.22;
+  }
+}
+
+/** Winner celebration with raised claws and bounce. */
+export function animateVictory(group: THREE.Group, time: number): void {
+  group.position.y += 0.08 + Math.abs(Math.sin(time * 6)) * 0.1;
+  group.rotation.z = Math.sin(time * 5) * 0.12;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.z = 1.05 + Math.sin(time * 8) * 0.18;
+    leftClaw.rotation.x = -0.18;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.z = -1.05 + Math.sin(time * 8 + Math.PI) * 0.18;
+    rightClaw.rotation.x = -0.18;
+  }
+}
+
+/** Fallen posture for permanently eliminated agents. */
+export function animateDefeated(group: THREE.Group, time: number): void {
+  group.rotation.x = Math.PI * 0.5;
+  group.rotation.z = Math.sin(time * 2.5) * 0.02;
+  group.position.y = 0.04;
+
+  const leftClaw = group.getObjectByName("claw_left");
+  const rightClaw = group.getObjectByName("claw_right");
+  if (leftClaw) {
+    leftClaw.rotation.x = -0.6;
+    leftClaw.rotation.z = 0.25;
+  }
+  if (rightClaw) {
+    rightClaw.rotation.x = -0.6;
+    rightClaw.rotation.z = -0.25;
+  }
+}

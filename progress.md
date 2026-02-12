@@ -372,3 +372,43 @@ Original prompt: check innitIdea.md and i found this open source repoor @opencla
 - Re-ran full test suite after adding tests: 42/42 passing.
 - Final validation after overlay text escape cleanup: `npm run build` passes.
 - Added deterministic per-agent horizontal offsets for in-world combat overlays (indicator, HP, intent, damage, KO) to reduce text overlap when fighters cluster.
+
+## Update 2026-02-13 (lobster animation polish)
+- Added new combat-ready stance animation in `src/scene/lobster.ts`:
+  - `animateCombatReady(...)` keeps lobsters in a tense, alive posture between explicit turn actions.
+- Wired combat-ready fallback in `src/scene/lobster-manager.ts`:
+  - While `entry.inCombat` and no transient action is active, lobsters now render `animateCombatReady` instead of plain idle.
+- Added stronger attack burst FX in `src/scene/particle-engine.ts`:
+  - New `slash` particle preset.
+  - New `slash` ring preset.
+- Hooked slash FX into combat event flow in `src/main.ts`:
+  - Emit slash burst/ring on `strike` and `feint` during intent and round resolution.
+
+## Verification 2026-02-13
+- `npm run build` passed.
+- Ran develop-web-game Playwright loop and inspected latest screenshots:
+  - `output/web-game/anim-combat-quick/shot-0.png`
+  - `output/web-game/anim-combat-final/shot-0.png`
+  - `output/web-game/anim-combat-final/shot-3.png`
+- Confirmed battle scene now shows richer active-combat readability via persistent combat stance and stronger attack VFX.
+
+## TODO
+- If you want even clearer readability from far camera, next step is scaling intent/damage pop overlays by camera distance and widening strike lunge amplitude slightly.
+
+## Update 2026-02-13 (overlay polish + exploration behavior)
+- Removed lingering Clawhub wording in world scene comments:
+  - `src/main.ts` comment now references generic interactive building(s) only.
+- Improved agent exploration behavior in simulation:
+  - `simulate_agents.ps1` now uses random patrol hops across the island (`Get-RandomWorldPoint`, `Invoke-ExploreHop`).
+  - Exploration phase now runs multi-round waypoints with mixed actions/emotes/chats so bots roam more instead of clustering.
+- Improved in-world overlay readability for crowded scenes:
+  - `src/scene/effects.ts`: raised/repositioned label/chat/HP/stamina/intent/damage/KO overlay anchors to reduce overlap.
+  - `src/style.css`: upgraded visual styling for `.lobster-label`, `.chat-bubble`, `.combat-hp`, `.combat-stamina` (contrast, spacing, clarity).
+
+## Verification 2026-02-13
+- `npm run build` passed.
+- `simulate_agents.ps1` syntax check passed.
+- Playwright capture run completed and screenshots reviewed:
+  - `output/web-game/ui-overlay-refresh/shot-1.png`
+  - `output/web-game/ui-overlay-postchange/shot-0.png`
+- Repo search confirms no in-app source reference for "Clawhub Academy" remains in `src/`, `server/`, or `public/`.

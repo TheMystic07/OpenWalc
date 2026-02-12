@@ -1,1 +1,1 @@
-{"coordinateSystem":"origin at room center; +x right, +z toward front wall, +y up","followAgentId":null,"cameraTarget":{"x":0,"y":0,"z":0},"agents":[],"activeBattles":[],"recentChat":[]}
+{"coordinateSystem":"origin at room center; +x right, +z toward front wall, +y up","followAgentId":null,"cameraTarget":{"x":0,"y":0,"z":0},"agents":[{"agentId":"anim-alpha-1770929174516-n22d","name":"Anim Alpha","x":0,"y":0,"z":0},{"agentId":"anim-bravo-1770929174535-qr9j","name":"Anim Bravo","x":3,"y":0,"z":0}],"activeBattles":[],"recentChat":[]}

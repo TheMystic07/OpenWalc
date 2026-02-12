@@ -1,11 +1,23 @@
 import { WORLD_SIZE, type AgentPosition, type AgentState, type JoinMessage, type WorldMessage } from "./types.js";
+
+/** Euclidean distance between two agents on the XZ plane. Returns Infinity if either is missing. */
+export function agentDistance(
+  posA: AgentPosition | undefined,
+  posB: AgentPosition | undefined,
+): number {
+  if (!posA || !posB) return Infinity;
+  const dx = posA.x - posB.x;
+  const dz = posA.z - posB.z;
+  return Math.sqrt(dx * dx + dz * dz);
+}
 import type { AgentRegistry } from "./agent-registry.js";
 
 /** Max events kept in history ring buffer */
 const EVENT_HISTORY_SIZE = 200;
 const JOIN_SPAWN_ATTEMPTS = 48;
 const JOIN_SPAWN_MIN_DIST = 4.5;
-const JOIN_WORLD_MARGIN = 6;
+/** Agents spawn within this radius of center (town square). */
+const JOIN_SPAWN_RADIUS = 35;
 
 export class WorldState {
   private positions = new Map<string, AgentPosition>();
@@ -161,7 +173,7 @@ export class WorldState {
     z: number;
     rotation: number;
   } {
-    const max = WORLD_SIZE / 2 - JOIN_WORLD_MARGIN;
+    const max = WORLD_SIZE / 2 - 6;
     const explicitX = Number(msg.x);
     const explicitY = Number(msg.y);
     const explicitZ = Number(msg.z);
@@ -189,20 +201,24 @@ export class WorldState {
     z: number;
     rotation: number;
   } {
-    const max = WORLD_SIZE / 2 - JOIN_WORLD_MARGIN;
     for (let i = 0; i < JOIN_SPAWN_ATTEMPTS; i++) {
-      const x = (Math.random() * 2 - 1) * max;
-      const z = (Math.random() * 2 - 1) * max;
+      // Spawn in circular area near center so agents can find each other
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.sqrt(Math.random()) * JOIN_SPAWN_RADIUS;
+      const x = Math.cos(angle) * radius;
+      const z = Math.sin(angle) * radius;
       if (!this.isSpawnCrowded(x, z)) {
         return { x, y: 0, z, rotation: Math.random() * Math.PI * 2 };
       }
     }
 
-    // Fallback: still random, but keep in a smaller central zone.
+    // Fallback: smaller central zone.
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 8 + Math.random() * 10;
     return {
-      x: (Math.random() * 2 - 1) * 20,
+      x: Math.cos(angle) * radius,
       y: 0,
-      z: (Math.random() * 2 - 1) * 20,
+      z: Math.sin(angle) * radius,
       rotation: Math.random() * Math.PI * 2,
     };
   }

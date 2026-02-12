@@ -4,6 +4,7 @@ import type { SpatialGrid } from "./spatial-index.js";
 import type { CommandQueue } from "./command-queue.js";
 import { ClientManager, AOI_RADIUS } from "./client-manager.js";
 import type { WorldMessage, AgentState, WSServerMessage } from "./types.js";
+import { CHAT_RANGE } from "./types.js";
 import type { NostrWorld } from "./nostr-world.js";
 
 /** Server tick rate in Hz */
@@ -16,6 +17,7 @@ const FULL_SNAPSHOT_INTERVAL = TICK_RATE * 5;
 export class GameLoop {
   private tickCount = 0;
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private tickHooks: Array<(tickCount: number) => void> = [];
 
   /** Events that happened this tick — broadcast to relevant clients */
   private tickEvents: WorldMessage[] = [];
@@ -27,6 +29,11 @@ export class GameLoop {
     private clientManager: ClientManager,
     private nostr: NostrWorld,
   ) {}
+
+  /** Register a function called every tick */
+  onTick(hook: (tickCount: number) => void): void {
+    this.tickHooks.push(hook);
+  }
 
   get currentTick(): number {
     return this.tickCount;
@@ -48,6 +55,11 @@ export class GameLoop {
     try {
       this.tickCount++;
       this.tickEvents = [];
+
+      // 0. Run registered tick hooks
+      for (const hook of this.tickHooks) {
+        hook(this.tickCount);
+      }
 
       // 1. Drain pending commands from the queue
       const commands = this.commandQueue.drain();
@@ -138,16 +150,30 @@ export class GameLoop {
     );
 
     for (const event of this.tickEvents) {
-      // Events from join/leave/profile/chat/emote are always sent (global)
+      // Global events always sent regardless of distance
       const isGlobal =
         event.worldType === "join" ||
         event.worldType === "leave" ||
         event.worldType === "profile" ||
-        event.worldType === "chat" ||
-        event.worldType === "emote" ||
         event.worldType === "battle";
 
-      if (isGlobal || nearbyAgents.has(event.agentId)) {
+      // Chat & emote are proximity-filtered: only viewers near the speaker
+      const isSpatialMessage =
+        event.worldType === "chat" || event.worldType === "emote";
+
+      if (isSpatialMessage) {
+        // Deliver chat/emote only to clients whose viewport is near the speaker
+        const speakerPos = this.worldState.getPosition(event.agentId);
+        if (speakerPos) {
+          const dx = client.viewX - speakerPos.x;
+          const dz = client.viewZ - speakerPos.z;
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          if (dist <= CHAT_RANGE + AOI_RADIUS) {
+            const msg: WSServerMessage = { type: "world", message: event };
+            this.safeSend(client.ws, msg);
+          }
+        }
+      } else if (isGlobal || nearbyAgents.has(event.agentId)) {
         const msg: WSServerMessage = { type: "world", message: event };
         this.safeSend(client.ws, msg);
       }

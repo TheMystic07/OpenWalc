@@ -8,16 +8,37 @@ import type {
 
 const BATTLE_START_RANGE = 12;
 const MAX_HP = 100;
+const MAX_STAMINA = 100;
+const TURN_TIMEOUT_MS = 30_000;
+
+/** Stamina cost per intent (guard recovers instead) */
+const STAMINA_COST: Record<BattleIntent, number> = {
+  strike: 20,
+  feint: 15,
+  approach: 5,
+  guard: 0,
+  retreat: 10,
+};
+
+const GUARD_STAMINA_RECOVERY = 10;
+const MOMENTUM_READ_BONUS = 5;
 
 interface ActiveBattle {
   battleId: string;
   participants: [string, string];
   hp: Record<string, number>;
   power: Record<string, number>;
+  stamina: Record<string, number>;
   intents: Partial<Record<string, BattleIntent>>;
+  /** Previous turn's intents for momentum detection */
+  prevIntents: Partial<Record<string, BattleIntent>>;
   turn: number;
   startedAt: number;
   updatedAt: number;
+  /** When the current turn began (for timeout) */
+  turnStartedAt: number;
+  /** Agents who have proposed a truce (persists across turns) */
+  truceProposals: Set<string>;
 }
 
 export class BattleManager {
@@ -36,15 +57,7 @@ export class BattleManager {
   listActive(): BattleStateSummary[] {
     const battles = Array.from(this.battles.values())
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map((battle) => ({
-        battleId: battle.battleId,
-        participants: battle.participants,
-        turn: battle.turn,
-        hp: { ...battle.hp },
-        pending: battle.participants.filter((id) => !battle.intents[id]),
-        startedAt: battle.startedAt,
-        updatedAt: battle.updatedAt,
-      }));
+      .map((battle) => this.toSummary(battle));
     return battles;
   }
 
@@ -86,16 +99,24 @@ export class BattleManager {
       [attackerId]: this.normalizePower(powers?.attacker),
       [defenderId]: this.normalizePower(powers?.defender),
     };
+    const stamina: Record<string, number> = {
+      [attackerId]: MAX_STAMINA,
+      [defenderId]: MAX_STAMINA,
+    };
 
     const battle: ActiveBattle = {
       battleId,
       participants,
       hp,
       power,
+      stamina,
       intents: {},
+      prevIntents: {},
       turn: 1,
       startedAt: timestamp,
       updatedAt: timestamp,
+      turnStartedAt: timestamp,
+      truceProposals: new Set(),
     };
 
     this.battles.set(battleId, battle);
@@ -110,6 +131,7 @@ export class BattleManager {
       participants,
       turn: 1,
       hp: { ...hp },
+      stamina: { ...stamina },
       summary: `${attackerId} challenged ${defenderId}. Turn 1 started.`,
       timestamp,
     };
@@ -136,9 +158,17 @@ export class BattleManager {
       return { ok: false, error: "Intent already submitted for this turn" };
     }
 
-    battle.intents[agentId] = intent;
+    // Enforce stamina — downgrade to guard if insufficient
+    let effectiveIntent = intent;
+    const cost = STAMINA_COST[intent];
+    if (cost > 0 && battle.stamina[agentId] < cost) {
+      effectiveIntent = "guard";
+    }
+
+    battle.intents[agentId] = effectiveIntent;
     battle.updatedAt = timestamp;
 
+    const forced = effectiveIntent !== intent;
     const intentEvent: BattleMessage = {
       worldType: "battle",
       agentId,
@@ -147,9 +177,12 @@ export class BattleManager {
       participants: battle.participants,
       turn: battle.turn,
       hp: { ...battle.hp },
+      stamina: { ...battle.stamina },
       actorId: agentId,
-      intent,
-      summary: `${agentId} locked intent: ${intent} (turn ${battle.turn}).`,
+      intent: effectiveIntent,
+      summary: forced
+        ? `${agentId} tried ${intent} but lacked stamina — forced to guard (turn ${battle.turn}).`
+        : `${agentId} locked intent: ${effectiveIntent} (turn ${battle.turn}).`,
       timestamp,
     };
 
@@ -162,6 +195,62 @@ export class BattleManager {
       ok: true,
       battle: this.battles.has(battleId) ? this.toSummary(this.battles.get(battleId)!) : null,
       events,
+    };
+  }
+
+  proposeTruce(
+    agentId: string,
+    battleId: string,
+    timestamp = Date.now(),
+  ): { ok: true; battle: BattleStateSummary | null; events: BattleMessage[]; accepted: boolean } | { ok: false; error: string } {
+    const battle = this.battles.get(battleId);
+    if (!battle) return { ok: false, error: "Battle not found" };
+    if (!battle.participants.includes(agentId)) {
+      return { ok: false, error: "Agent is not a participant in this battle" };
+    }
+
+    if (battle.truceProposals.has(agentId)) {
+      return { ok: false, error: "Truce already proposed" };
+    }
+
+    battle.truceProposals.add(agentId);
+    battle.updatedAt = timestamp;
+    const opponent = battle.participants.find((id) => id !== agentId)!;
+
+    // Both proposed — end the battle peacefully
+    if (battle.truceProposals.has(opponent)) {
+      const ended = this.makeEndedMessage(
+        battle,
+        undefined,
+        undefined,
+        "truce",
+        `${agentId} and ${opponent} agreed to a truce. Battle ended peacefully.`,
+        [],
+        timestamp,
+      );
+      this.finishBattle(battle);
+      return { ok: true, battle: null, events: [ended], accepted: true };
+    }
+
+    // Only one side proposed — notify and wait
+    const proposeEvent: BattleMessage = {
+      worldType: "battle",
+      agentId,
+      battleId,
+      phase: "intent",
+      participants: battle.participants,
+      turn: battle.turn,
+      hp: { ...battle.hp },
+      stamina: { ...battle.stamina },
+      summary: `${agentId} proposes a truce. ${opponent} can accept with truce or keep fighting.`,
+      timestamp,
+    };
+
+    return {
+      ok: true,
+      battle: this.toSummary(battle),
+      events: [proposeEvent],
+      accepted: false,
     };
   }
 
@@ -216,22 +305,88 @@ export class BattleManager {
     return [ended];
   }
 
+  /** Check all battles for turn timeouts. Called periodically from the game loop. */
+  checkTimeouts(timestamp = Date.now()): BattleMessage[] {
+    const allEvents: BattleMessage[] = [];
+
+    for (const battle of this.battles.values()) {
+      if (timestamp - battle.turnStartedAt < TURN_TIMEOUT_MS) continue;
+
+      const timedOut: string[] = [];
+      for (const agentId of battle.participants) {
+        if (!battle.intents[agentId]) {
+          battle.intents[agentId] = "guard";
+          timedOut.push(agentId);
+        }
+      }
+
+      if (timedOut.length > 0 && this.hasTurnReady(battle)) {
+        const timeoutEvent: BattleMessage = {
+          worldType: "battle",
+          agentId: battle.participants[0],
+          battleId: battle.battleId,
+          phase: "intent",
+          participants: battle.participants,
+          turn: battle.turn,
+          hp: { ...battle.hp },
+          stamina: { ...battle.stamina },
+          timedOut,
+          summary: `Turn ${battle.turn} timed out. ${timedOut.join(", ")} auto-guarded.`,
+          timestamp,
+        };
+        allEvents.push(timeoutEvent);
+        allEvents.push(...this.resolveTurn(battle, timestamp));
+      }
+    }
+
+    return allEvents;
+  }
+
   private resolveTurn(battle: ActiveBattle, timestamp: number): BattleMessage[] {
     const [a, b] = battle.participants;
     const intentA = battle.intents[a] ?? "guard";
     const intentB = battle.intents[b] ?? "guard";
     const turn = battle.turn;
 
-    const damageToB = this.computeDamage(intentA, intentB, battle.power[a]);
-    const damageToA = this.computeDamage(intentB, intentA, battle.power[b]);
+    // --- Stamina: apply costs and guard recovery ---
+    for (const [agentId, intent] of [[a, intentA], [b, intentB]] as [string, BattleIntent][]) {
+      if (intent === "guard") {
+        battle.stamina[agentId] = Math.min(MAX_STAMINA, battle.stamina[agentId] + GUARD_STAMINA_RECOVERY);
+      } else {
+        battle.stamina[agentId] = Math.max(0, battle.stamina[agentId] - STAMINA_COST[intent]);
+      }
+    }
+
+    // --- Momentum read bonus: +5 if opponent repeated their previous intent ---
+    const readBonusA = (battle.prevIntents[b] != null && battle.prevIntents[b] === intentB) ? MOMENTUM_READ_BONUS : 0;
+    const readBonusB = (battle.prevIntents[a] != null && battle.prevIntents[a] === intentA) ? MOMENTUM_READ_BONUS : 0;
+
+    // --- Damage computation ---
+    const baseDmgToB = this.computeDamage(intentA, intentB, battle.power[a]);
+    const baseDmgToA = this.computeDamage(intentB, intentA, battle.power[b]);
+
+    // Read bonus only applies when there's base damage to amplify
+    const damageToB = baseDmgToB > 0 ? baseDmgToB + readBonusA : 0;
+    const damageToA = baseDmgToA > 0 ? baseDmgToA + readBonusB : 0;
 
     battle.hp[a] = Math.max(0, battle.hp[a] - damageToA);
     battle.hp[b] = Math.max(0, battle.hp[b] - damageToB);
     battle.updatedAt = timestamp;
 
+    // Store intents for next turn's momentum check
+    battle.prevIntents = { [a]: intentA, [b]: intentB };
+
+    const readBonus: Record<string, number> = {};
+    if (readBonusA > 0) readBonus[a] = readBonusA;
+    if (readBonusB > 0) readBonus[b] = readBonusB;
+
     const roundSummary =
-      `Turn ${turn}: ${a}(${intentA}) -> ${damageToB} dmg, ` +
-      `${b}(${intentB}) -> ${damageToA} dmg. HP ${a}:${battle.hp[a]} ${b}:${battle.hp[b]}`;
+      `Turn ${turn}: ${a}(${intentA}) -> ${damageToB} dmg` +
+      (readBonusA > 0 ? ` (+${readBonusA} read)` : "") +
+      `, ${b}(${intentB}) -> ${damageToA} dmg` +
+      (readBonusB > 0 ? ` (+${readBonusB} read)` : "") +
+      `. HP ${a}:${battle.hp[a]} ${b}:${battle.hp[b]}` +
+      ` | STA ${a}:${battle.stamina[a]} ${b}:${battle.stamina[b]}`;
 
     const roundEvent: BattleMessage = {
       worldType: "battle",
@@ -241,8 +396,10 @@ export class BattleManager {
       participants: battle.participants,
       turn,
       hp: { ...battle.hp },
+      stamina: { ...battle.stamina },
       damage: { [a]: damageToA, [b]: damageToB },
       intents: { [a]: intentA, [b]: intentB },
+      readBonus: Object.keys(readBonus).length > 0 ? readBonus : undefined,
       summary: roundSummary,
       timestamp,
     };
@@ -257,6 +414,7 @@ export class BattleManager {
 
     battle.turn += 1;
     battle.intents = {};
+    battle.turnStartedAt = timestamp;
     return events;
   }
 
@@ -281,13 +439,15 @@ export class BattleManager {
       );
     }
 
+    // Retreat = flee: the agent escapes. No winner, no loser — just a clean exit.
+    // The fleeing agent still takes damage from this turn's resolution.
     if (intentA === "retreat") {
       return this.makeEndedMessage(
         battle,
-        b,
-        a,
-        "retreat",
-        `${a} retreated. ${b} wins.`,
+        undefined,
+        undefined,
+        "flee",
+        `${a} fled the battle. No winner declared.`,
         [],
         timestamp,
       );
@@ -295,10 +455,10 @@ export class BattleManager {
     if (intentB === "retreat") {
       return this.makeEndedMessage(
         battle,
-        a,
-        b,
-        "retreat",
-        `${b} retreated. ${a} wins.`,
+        undefined,
+        undefined,
+        "flee",
+        `${b} fled the battle. No winner declared.`,
         [],
         timestamp,
       );
@@ -343,24 +503,26 @@ export class BattleManager {
     return null;
   }
 
+  /** Rebalanced damage matrix */
   private computeDamage(attackerIntent: BattleIntent, defenderIntent: BattleIntent, attackerPower: number): number {
     let base = 0;
     switch (attackerIntent) {
       case "strike": {
         if (defenderIntent === "guard") base = 10;
+        else if (defenderIntent === "strike") base = 18;
         else if (defenderIntent === "feint") base = 28;
         else if (defenderIntent === "retreat") base = 30;
-        else base = 22;
+        else base = 22; // vs approach
         break;
       }
       case "feint": {
-        if (defenderIntent === "guard") base = 20;
+        if (defenderIntent === "guard") base = 10;
         else if (defenderIntent === "retreat") base = 22;
-        else base = 14;
+        else base = 14; // vs approach, strike, feint
         break;
       }
       case "approach": {
-        base = defenderIntent === "retreat" ? 8 : 4;
+        base = defenderIntent === "retreat" ? 12 : 4;
         break;
       }
       case "guard":
@@ -408,6 +570,7 @@ export class BattleManager {
       participants: battle.participants,
       turn: battle.turn,
       hp: { ...battle.hp },
+      stamina: { ...battle.stamina },
       winnerId,
       loserId,
       defeatedIds: defeatedIds.length > 0 ? defeatedIds : undefined,
@@ -426,6 +589,8 @@ export class BattleManager {
       pending: battle.participants.filter((id) => !battle.intents[id]),
       startedAt: battle.startedAt,
       updatedAt: battle.updatedAt,
+      stamina: { ...battle.stamina },
+      turnDeadline: battle.turnStartedAt + TURN_TIMEOUT_MS,
     };
   }
 }

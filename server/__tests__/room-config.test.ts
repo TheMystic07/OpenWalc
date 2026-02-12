@@ -28,7 +28,7 @@ describe("loadRoomConfig", () => {
   it.each([
     ["roomName", "Open WALC"],
     ["roomDescription", ""],
-    ["host", "127.0.0.1"],
+    ["host", "0.0.0.0"],
     ["port", 18800],
     ["maxAgents", 100],
     ["prizePoolUsd", 10000],

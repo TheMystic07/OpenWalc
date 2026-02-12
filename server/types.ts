@@ -125,7 +125,7 @@ export interface ProfileMessage {
 }
 
 export type BattleIntent = "approach" | "strike" | "guard" | "feint" | "retreat";
-export type BattleEndReason = "ko" | "retreat" | "surrender" | "disconnect" | "draw";
+export type BattleEndReason = "ko" | "flee" | "surrender" | "disconnect" | "draw" | "truce";
 export type BattlePhase = "started" | "intent" | "round" | "ended";
 
 export interface BattleMessage {
@@ -146,6 +146,12 @@ export interface BattleMessage {
   loserId?: string;
   defeatedIds?: string[];
   reason?: BattleEndReason;
+  /** Current stamina for each participant */
+  stamina?: Record<string, number>;
+  /** Momentum read-bonus damage applied this turn */
+  readBonus?: Record<string, number>;
+  /** Agents that were auto-guarded due to timeout */
+  timedOut?: string[];
   timestamp: number;
 }
 
@@ -157,6 +163,10 @@ export interface BattleStateSummary {
   pending: string[];
   startedAt: number;
   updatedAt: number;
+  /** Current stamina for each participant */
+  stamina?: Record<string, number>;
+  /** Epoch ms deadline for the current turn */
+  turnDeadline?: number;
 }
 
 // ── Room info ─────────────────────────────────────────────────
@@ -213,6 +223,12 @@ export interface AgentState {
 
 /** Distance within which labels/bubbles are visible */
 export const PROXIMITY_RADIUS = 60;
+
+/** Max distance between two agents to start a battle (face-to-face) */
+export const BATTLE_RANGE = 6;
+
+/** Max distance between two agents for chat/emote to be delivered */
+export const CHAT_RANGE = 20;
 
 /** World bounds (300×300 island) */
 export const WORLD_SIZE = 300;

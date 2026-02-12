@@ -33,15 +33,15 @@ describe("WorldState join spawn handling", () => {
     expect(pos?.rotation).toBe(1.25);
   });
 
-  it("generates in-bounds spawn when join payload omits position", () => {
+  it("generates spawn within central town-square radius", () => {
     const state = new WorldState(new AgentRegistry());
     state.apply(makeJoin("a2"));
 
     const pos = state.getPosition("a2");
     expect(pos).toBeDefined();
-    const half = WORLD_SIZE / 2;
-    expect(Math.abs(pos!.x)).toBeLessThanOrEqual(half);
-    expect(Math.abs(pos!.z)).toBeLessThanOrEqual(half);
+    // Agents should spawn within ~35-unit radius of center (town square)
+    const dist = Math.sqrt(pos!.x * pos!.x + pos!.z * pos!.z);
+    expect(dist).toBeLessThanOrEqual(40); // small margin for fallback
     expect(pos?.y).toBe(0);
   });
 

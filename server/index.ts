@@ -1,8 +1,8 @@
-﻿import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { AgentRegistry } from "./agent-registry.js";
-import { WorldState } from "./world-state.js";
+import { WorldState, agentDistance } from "./world-state.js";
 import { NostrWorld } from "./nostr-world.js";
 import { WSBridge } from "./ws-bridge.js";
 import { SpatialGrid } from "./spatial-index.js";
@@ -21,12 +21,13 @@ import type {
   BattleMessage,
   SurvivalContractState,
 } from "./types.js";
-import { WORLD_SIZE } from "./types.js";
+import { WORLD_SIZE, BATTLE_RANGE, CHAT_RANGE } from "./types.js";
 
 const SPAWN_ATTEMPTS = 72;
 const SPAWN_AGENT_PADDING = 4.8;
 const SPAWN_OBSTACLE_PADDING = 1.2;
-const SPAWN_WORLD_MARGIN = 8;
+/** Agents spawn within this radius of the world center (town square). */
+const SPAWN_RADIUS = 35;
 const SPAWN_RESERVATION_MS = 20_000;
 const SYSTEM_AGENT_ID = "system";
 const DEFAULT_PRIZE_SUMMARY = "Agents can fight for the pool or refuse violence.";
@@ -85,6 +86,18 @@ commandQueue.setObstacles([
 ]);
 
 const gameLoop = new GameLoop(state, spatialGrid, commandQueue, clientManager, nostr);
+
+// Check battle timeouts once per second (every TICK_RATE ticks)
+gameLoop.onTick((tick) => {
+  if (tick % TICK_RATE !== 0) return;
+  const timeoutEvents = battleManager.checkTimeouts();
+  for (const ev of timeoutEvents) {
+    commandQueue.enqueue(ev);
+  }
+  for (const notice of applyBattleConsequences(timeoutEvents)) {
+    commandQueue.enqueue(notice);
+  }
+});
 
 // ── Survival contract state ────────────────────────────────────
 
@@ -343,12 +356,14 @@ function chooseSpawnPoint(agentId: string): { x: number; y: number; z: number; r
   }
 
   const now = Date.now();
-  const worldHalf = WORLD_SIZE / 2 - SPAWN_WORLD_MARGIN;
   const active = collectSpawnBlocks(now);
 
   for (let i = 0; i < SPAWN_ATTEMPTS; i++) {
-    const x = (Math.random() * 2 - 1) * worldHalf;
-    const z = (Math.random() * 2 - 1) * worldHalf;
+    // Spawn in a circular area near center so agents can find each other
+    const angle = Math.random() * Math.PI * 2;
+    const radius = Math.sqrt(Math.random()) * SPAWN_RADIUS; // sqrt for uniform distribution
+    const x = Math.cos(angle) * radius;
+    const z = Math.sin(angle) * radius;
     if (spawnIsBlocked(x, z, active)) continue;
     spawnReservations.set(agentId, { x, z, expiresAt: now + SPAWN_RESERVATION_MS });
     return {
@@ -359,7 +374,7 @@ function chooseSpawnPoint(agentId: string): { x: number; y: number; z: number; r
     };
   }
 
-  const fallbackRadius = 16 + Math.random() * 12;
+  const fallbackRadius = 12 + Math.random() * 10;
   const fallbackTheta = Math.random() * Math.PI * 2;
   const x = Math.cos(fallbackTheta) * fallbackRadius;
   const z = Math.sin(fallbackTheta) * fallbackRadius;
@@ -605,6 +620,7 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
     "world-battle-start",
     "world-battle-intent",
     "world-battle-surrender",
+    "world-battle-truce",
   ]);
   if (agentCommands.has(command)) {
     const agentId = (args as { agentId?: string })?.agentId;
@@ -826,6 +842,17 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       if (!defenderProfile || !state.hasAgent(a.targetAgentId)) {
         return { ok: false, error: "unknown_target_agent" };
       }
+      // ── Proximity check: agents must be face-to-face to fight ──
+      const atkPos = state.getPosition(a.agentId);
+      const defPos = state.getPosition(a.targetAgentId);
+      const combatDist = agentDistance(atkPos, defPos);
+      if (combatDist > BATTLE_RANGE) {
+        return {
+          ok: false,
+          error: "too_far",
+          message: `Must be within ${BATTLE_RANGE} units to fight (currently ${combatDist.toFixed(1)} apart)`,
+        };
+      }
       const attackerKills = attackerProfile?.combat?.kills ?? 0;
       const defenderKills = defenderProfile?.combat?.kills ?? 0;
       const result = battleManager.startBattle(
@@ -896,6 +923,19 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         commandQueue.enqueue(notice);
       }
       return { ok: true };
+    }
+
+    case "world-battle-truce": {
+      const a = args as { agentId: string; battleId: string };
+      if (!a?.agentId || !a?.battleId) {
+        throw new Error("agentId and battleId required");
+      }
+      const result = battleManager.proposeTruce(a.agentId, a.battleId);
+      if (!result.ok) return { ok: false, error: result.error };
+      for (const ev of result.events) {
+        commandQueue.enqueue(ev);
+      }
+      return { ok: true, accepted: result.accepted, battle: result.battle };
     }
 
     case "world-battles":

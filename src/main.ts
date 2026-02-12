@@ -1,5 +1,6 @@
 import { createScene } from "./scene/room.js";
 import { LobsterManager } from "./scene/lobster-manager.js";
+import { ParticleEngine } from "./scene/particle-engine.js";
 import { EffectsManager } from "./scene/effects.js";
 import { createBuildings } from "./scene/buildings.js";
 import { WSClient } from "./net/ws-client.js";
@@ -36,10 +37,11 @@ const focusAgent = params.get("agent");
 
 const { scene, camera, renderer, labelRenderer, controls, clock, terrainReady } = createScene();
 
-// Add buildings (Moltbook + Clawhub) to the scene
+// Add interactive world building(s) to the scene
 const { buildings, obstacles: buildingObstacles } = createBuildings(scene);
 
-const lobsterManager = new LobsterManager(scene, buildingObstacles);
+const particleEngine = new ParticleEngine(scene);
+const lobsterManager = new LobsterManager(scene, buildingObstacles, particleEngine);
 
 // Terrain models load asynchronously — feed obstacles to lobster manager when ready
 terrainReady.then((terrainObstacles) => {
@@ -54,6 +56,10 @@ const effects = new EffectsManager(scene, camera);
 
 const overlay = setupOverlay();
 const chatLog = setupChatLog();
+chatLog.setNameResolver((agentId: string) => {
+  const profile = overlay.getAgent(agentId);
+  return profile?.name ?? agentId;
+});
 const battlePanel = setupBattlePanel((agentId: string) => {
   const profile = overlay.getAgent(agentId);
   return profile?.name ?? agentId;
@@ -84,7 +90,7 @@ function fallbackJoinPosition(agentId: string, timestamp: number): {
     hash = (hash * 31 + agentId.charCodeAt(i)) >>> 0;
   }
   const angle = (hash % 360) * (Math.PI / 180);
-  const radius = 8 + (hash % 19);
+  const radius = 10 + (hash % 22);
   return {
     agentId,
     x: Math.cos(angle) * radius,
@@ -98,11 +104,15 @@ function fallbackJoinPosition(agentId: string, timestamp: number): {
 function syncCombatVisualsFromBattles(battles: BattleStateSummary[]): void {
   const next = new Set<string>();
   const hpByAgent = new Map<string, number>();
+  const staminaByAgent = new Map<string, number>();
 
   for (const battle of battles) {
     for (const agentId of battle.participants) {
       next.add(agentId);
       hpByAgent.set(agentId, Math.max(0, Math.min(100, battle.hp[agentId] ?? 0)));
+      if (battle.stamina) {
+        staminaByAgent.set(agentId, Math.max(0, Math.min(100, battle.stamina[agentId] ?? 100)));
+      }
     }
   }
 
@@ -112,6 +122,7 @@ function syncCombatVisualsFromBattles(battles: BattleStateSummary[]): void {
     lobsterManager.setCombatState(agentId, false);
     effects.setCombatIndicator(agentId, false);
     effects.setCombatHp(agentId, null);
+    effects.setCombatStamina(agentId, null);
   }
 
   for (const agentId of next) {
@@ -121,6 +132,7 @@ function syncCombatVisualsFromBattles(battles: BattleStateSummary[]): void {
       effects.setCombatIndicator(agentId, true);
     }
     effects.setCombatHp(agentId, hpByAgent.get(agentId) ?? 0);
+    effects.setCombatStamina(agentId, staminaByAgent.get(agentId) ?? 100);
   }
 }
 
@@ -171,12 +183,15 @@ ws.on("world", (_raw) => {
   const intentToAction = (intent: BattleIntent): string => {
     switch (intent) {
       case "strike":
+        return "strike";
       case "feint":
-        return "pinch";
+        return "feint";
       case "guard":
-        return "wave";
-      case "retreat":
+        return "guard";
       case "approach":
+        return "approach";
+      case "retreat":
+        return "retreat";
       default:
         return "walk";
     }
@@ -285,32 +300,105 @@ ws.on("world", (_raw) => {
 
     case "battle":
       battlePanel.applyEvent(msg);
-      chatLog.addBattle(msg.summary);
       syncCombatVisualsFromBattles(battlePanel.getSnapshot());
+
+      // Only show deaths/KOs in world chat — not every battle tick
+      if (msg.phase === "ended" && msg.defeatedIds && msg.defeatedIds.length > 0) {
+        for (const deadId of msg.defeatedIds) {
+          const deadName = overlay.getAgent(deadId)?.name ?? deadId;
+          const killerName = msg.winnerId
+            ? (overlay.getAgent(msg.winnerId)?.name ?? msg.winnerId)
+            : "unknown";
+          chatLog.addBattle(`${deadName} was eliminated by ${killerName}!`);
+        }
+      }
 
       if (msg.phase === "started") {
         for (const agentId of msg.participants) {
-          lobsterManager.setAction(agentId, "pinch");
+          lobsterManager.triggerAction(agentId, "approach", 520);
+          // Battle start burst particles
+          const pos = lobsterManager.getPosition(agentId);
+          if (pos) {
+            particleEngine.emit("battleStart", pos);
+            particleEngine.emitRing("battleStart", pos);
+          }
         }
       }
 
       if (msg.phase === "intent" && msg.actorId && msg.intent) {
-        lobsterManager.setAction(msg.actorId, intentToAction(msg.intent));
+        const action = intentToAction(msg.intent);
+        lobsterManager.triggerAction(msg.actorId, action, 900);
         effects.showIntent(msg.actorId, msg.intent, msg.turn);
+        // Guard shield particles
+        if (msg.intent === "guard") {
+          const pos = lobsterManager.getPosition(msg.actorId);
+          if (pos) {
+            particleEngine.emit("guard", pos);
+            particleEngine.emitRing("guard", pos);
+          }
+        }
+        if (msg.intent === "strike" || msg.intent === "feint") {
+          const pos = lobsterManager.getPosition(msg.actorId);
+          if (pos) {
+            particleEngine.emit("spark", pos);
+            particleEngine.emit("slash", pos);
+            particleEngine.emitRing("slash", pos);
+          }
+        }
       }
 
       if (msg.phase === "round" && msg.intents) {
         for (const [agentId, intent] of Object.entries(msg.intents)) {
           if (!intent) continue;
-          lobsterManager.setAction(agentId, intentToAction(intent));
+          lobsterManager.triggerAction(agentId, intentToAction(intent), 820);
           effects.showIntent(agentId, intent, msg.turn);
+          // Guard shield particles on round resolve
+          if (intent === "guard") {
+            const pos = lobsterManager.getPosition(agentId);
+            if (pos) {
+              particleEngine.emit("guard", pos);
+              particleEngine.emitRing("guard", pos);
+            }
+          }
+          if (intent === "strike" || intent === "feint") {
+            const pos = lobsterManager.getPosition(agentId);
+            if (pos) {
+              particleEngine.emit("slash", pos);
+              particleEngine.emitRing("slash", pos);
+            }
+          }
         }
+
         const recipients = msg.participants ?? [];
         for (const agentId of recipients) {
           const normalized = Math.max(0, Number(msg.damage?.[agentId] ?? 0) || 0);
           effects.showDamage(agentId, normalized);
           if (normalized > 0) {
             lobsterManager.pulseImpact(agentId);
+            lobsterManager.triggerAction(agentId, "stunned", 420);
+          }
+        }
+
+        // Stamina update
+        if (msg.stamina) {
+          for (const agentId of recipients) {
+            effects.setCombatStamina(agentId, msg.stamina[agentId] ?? 100);
+          }
+        }
+
+        // Read bonus visual
+        if (msg.readBonus) {
+          for (const [agentId, bonus] of Object.entries(msg.readBonus)) {
+            if (bonus > 0) {
+              effects.showReadBonus(agentId);
+            }
+          }
+        }
+
+        // Timeout warnings
+        if (msg.timedOut) {
+          for (const agentId of msg.timedOut) {
+            effects.showTimeout(agentId);
           }
         }
       }
@@ -318,10 +406,36 @@ ws.on("world", (_raw) => {
       if (msg.phase === "ended") {
         for (const agentId of msg.participants) {
           lobsterManager.setAction(agentId, "idle");
+          effects.setCombatStamina(agentId, null);
+        }
+        if (msg.winnerId) {
+          lobsterManager.triggerAction(msg.winnerId, "victory", 1700);
         }
         for (const defeatedId of msg.defeatedIds ?? []) {
           lobsterManager.setDeadState(defeatedId, true);
           effects.showKO(defeatedId);
+        }
+        // Flee visuals: smoke puff on the fleeing agent
+        if (msg.reason === "flee") {
+          for (const agentId of msg.participants) {
+            const pos = lobsterManager.getPosition(agentId);
+            if (pos) {
+              particleEngine.emit("flee", pos);
+              particleEngine.emitRing("flee", pos);
+            }
+            effects.showFlee(agentId);
+          }
+        }
+        // Truce visuals: green burst on both agents
+        if (msg.reason === "truce") {
+          for (const agentId of msg.participants) {
+            const pos = lobsterManager.getPosition(agentId);
+            if (pos) {
+              particleEngine.emit("truce", pos);
+              particleEngine.emitRing("truce", pos);
+            }
+            effects.showTruce(agentId);
+          }
         }
       }
       break;
