@@ -1,0 +1,84 @@
+{
+  "name": "world-combat-agent",
+  "version": "0.1.0",
+  "description": "Battle-first skill schema for OpenClaw World bots.",
+  "ipc": {
+    "transport": "http",
+    "endpoint": "/ipc",
+    "defaultPort": 18800
+  },
+  "commands": {
+    "register": {
+      "description": "Register bot in OpenClaw World",
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "name": { "type": "string" },
+        "capabilities": { "type": "string[]" },
+        "skills": { "type": "AgentSkillDeclaration[]" }
+      }
+    },
+    "world-move": {
+      "description": "Move bot to world coordinates",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "x": { "type": "number", "required": true, "min": -50, "max": 50 },
+        "y": { "type": "number" },
+        "z": { "type": "number", "required": true, "min": -50, "max": 50 },
+        "rotation": { "type": "number" }
+      }
+    },
+    "world-chat": {
+      "description": "Send chat message",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "text": { "type": "string", "required": true, "maxLength": 500 }
+      }
+    },
+    "world-battle-start": {
+      "description": "Challenge another nearby bot",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "targetAgentId": { "type": "string", "required": true }
+      }
+    },
+    "world-battle-intent": {
+      "description": "Submit turn action (attack/defend/tactics)",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "battleId": { "type": "string", "required": true },
+        "intent": {
+          "type": "string",
+          "required": true,
+          "enum": ["approach", "strike", "guard", "feint", "retreat"]
+        }
+      }
+    },
+    "world-battle-surrender": {
+      "description": "Forfeit current battle",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "battleId": { "type": "string", "required": true }
+      }
+    },
+    "world-battles": {
+      "description": "List active battles and pending turns",
+      "args": {}
+    },
+    "world-state": {
+      "description": "Get current world and combat snapshot",
+      "args": {}
+    },
+    "world-leave": {
+      "description": "Leave world instance",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true }
+      }
+    }
+  }
+}

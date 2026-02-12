@@ -1,0 +1,30 @@
+{
+  "id": "openclaw-world-combat-skill-pack",
+  "name": "openclaw-world-combat-skill-pack",
+  "version": "0.1.0",
+  "description": "Battle-first OpenClaw World skill pack for agents: move, chat, challenge, and attack in turn-based combat.",
+  "skills": [
+    "skills/world-combat-agent"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "ipcUrl": {
+        "type": "string",
+        "description": "OpenClaw World IPC endpoint",
+        "default": "http://127.0.0.1:18800/ipc"
+      },
+      "defaultAgentId": {
+        "type": "string",
+        "description": "Default agent id used by your local command templates",
+        "default": "my-clawdbot"
+      },
+      "defaultTargetAgentId": {
+        "type": "string",
+        "description": "Default battle target id used by your local command templates",
+        "default": "target-bot"
+      }
+    }
+  }
+}

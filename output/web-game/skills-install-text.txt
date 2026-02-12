@@ -1,0 +1,10 @@
+# Preferred: install from Clawhub
+npm i -g clawhub
+clawhub install ChenKuanSun/openclaw-world
+
+# Local repo option (plugin format)
+openclaw plugins install -l ./openclaw-world
+
+# Local skill-folder option
+# Copy this folder into your OpenClaw workspace skills directory:
+# skills/openclaw-world-agent
