@@ -6,6 +6,8 @@ interface OverlayAPI {
   removeAgent(agentId: string): void;
   updateAgent(profile: AgentProfile): void;
   getAgent(agentId: string): AgentProfile | undefined;
+  setMobileOpen(open: boolean): void;
+  isMobileOpen(): boolean;
 }
 
 /**
@@ -15,6 +17,7 @@ interface OverlayAPI {
 export function setupOverlay(): OverlayAPI {
   const container = document.getElementById("overlay")!;
   const agents = new Map<string, AgentProfile>();
+  let mobileOpen = false;
 
   // Build DOM safely
   const header = document.createElement("div");
@@ -140,6 +143,13 @@ export function setupOverlay(): OverlayAPI {
     },
     getAgent(agentId: string) {
       return agents.get(agentId);
+    },
+    setMobileOpen(open: boolean) {
+      mobileOpen = open;
+      container.classList.toggle("mobile-open", open);
+    },
+    isMobileOpen() {
+      return mobileOpen;
     },
   };
 }

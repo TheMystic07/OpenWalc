@@ -5,6 +5,8 @@ export interface ChatLogAPI {
   getRecent(limit?: number): string[];
   /** Provide a function that resolves agentId -> display name */
   setNameResolver(fn: (agentId: string) => string): void;
+  setMobileOpen(open: boolean): void;
+  isMobileOpen(): boolean;
 }
 
 /**
@@ -16,6 +18,7 @@ export function setupChatLog(): ChatLogAPI {
   const recentEntries: string[] = [];
   let nameResolver: (id: string) => string = (id) => id;
   let mode: "compact" | "expanded" | "fullscreen" = "compact";
+  let mobileOpen = false;
   let userScrolledUp = false;
   let unreadCount = 0;
 
@@ -43,7 +46,7 @@ export function setupChatLog(): ChatLogAPI {
 
   // Fullscreen button (-> fullscreen)
   const fullscreenBtn = document.createElement("button");
-  fullscreenBtn.className = "chat-expand-btn";
+  fullscreenBtn.className = "chat-expand-btn chat-fullscreen-btn";
   fullscreenBtn.textContent = "\u2922"; // expand arrows
   fullscreenBtn.title = "Fullscreen";
   headerEl.appendChild(fullscreenBtn);
@@ -92,6 +95,10 @@ export function setupChatLog(): ChatLogAPI {
 
   fullscreenBtn.addEventListener("click", (e) => {
     e.stopPropagation();
+    if (window.matchMedia("(max-width: 900px)").matches) {
+      setMode("expanded");
+      return;
+    }
     setMode("fullscreen");
   });
 
@@ -139,7 +146,7 @@ export function setupChatLog(): ChatLogAPI {
       recentEntries.shift();
     }
     if (!userScrolledUp) scrollToBottom();
-    if (mode === "compact") {
+    if (mode === "compact" && !mobileOpen) {
       unreadCount++;
       badgeEl.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
       badgeEl.style.display = "";
@@ -158,6 +165,20 @@ export function setupChatLog(): ChatLogAPI {
   return {
     setNameResolver(fn: (agentId: string) => string): void {
       nameResolver = fn;
+    },
+    setMobileOpen(open: boolean): void {
+      mobileOpen = open;
+      container.classList.toggle("mobile-open", open);
+      if (!open && mode === "fullscreen") {
+        setMode("compact");
+      }
+      if (open && mode === "compact") {
+        unreadCount = 0;
+        badgeEl.style.display = "none";
+      }
+    },
+    isMobileOpen(): boolean {
+      return mobileOpen;
     },
 
     addMessage(agentId: string, text: string) {

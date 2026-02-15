@@ -72,6 +72,114 @@ const profilePanel = setupProfilePanel((agentId: string) => {
   }
 });
 
+type MobilePanelKey = "agents" | "battle" | "chat";
+
+interface MobilePanelController {
+  setMobileOpen(open: boolean): void;
+  isMobileOpen(): boolean;
+}
+
+function setupMobileHudToggles(): void {
+  const mobileQuery = window.matchMedia("(max-width: 900px)");
+  const panelControllers: Record<MobilePanelKey, MobilePanelController> = {
+    agents: overlay,
+    battle: battlePanel,
+    chat: chatLog,
+  };
+  const panelElements: Record<MobilePanelKey, HTMLElement> = {
+    agents: document.getElementById("overlay")!,
+    battle: document.getElementById("battle-panel")!,
+    chat: document.getElementById("chat-log")!,
+  };
+  const panelOrder: MobilePanelKey[] = ["agents", "battle", "chat"];
+  const buttons = new Map<MobilePanelKey, HTMLButtonElement>();
+  const controlsWrap = document.createElement("div");
+  controlsWrap.id = "mobile-panel-controls";
+  controlsWrap.setAttribute("role", "toolbar");
+  controlsWrap.setAttribute("aria-label", "World HUD toggles");
+
+  const defs: Array<{ key: MobilePanelKey; label: string }> = [
+    { key: "agents", label: "Agents" },
+    { key: "battle", label: "Battle" },
+    { key: "chat", label: "Chat" },
+  ];
+
+  for (const def of defs) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mobile-panel-btn";
+    btn.textContent = def.label;
+    btn.dataset.panel = def.key;
+    btn.setAttribute("aria-pressed", "false");
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const isOpen = panelControllers[def.key].isMobileOpen();
+      setPanelStates(isOpen ? null : def.key);
+    });
+    controlsWrap.appendChild(btn);
+    buttons.set(def.key, btn);
+  }
+
+  document.body.appendChild(controlsWrap);
+
+  function setPanelStates(openPanel: MobilePanelKey | null): void {
+    for (const key of panelOrder) {
+      const isOpen = openPanel === key;
+      panelControllers[key].setMobileOpen(isOpen);
+      const btn = buttons.get(key);
+      if (btn) {
+        btn.classList.toggle("active", isOpen);
+        btn.setAttribute("aria-pressed", isOpen ? "true" : "false");
+      }
+    }
+  }
+
+  function applyDesktopLayout(): void {
+    for (const key of panelOrder) {
+      panelControllers[key].setMobileOpen(true);
+      const btn = buttons.get(key);
+      if (btn) {
+        btn.classList.remove("active");
+        btn.setAttribute("aria-pressed", "false");
+      }
+    }
+  }
+
+  let previousMobile = false;
+  function syncMode(): void {
+    const isMobile = mobileQuery.matches;
+    document.body.classList.toggle("mobile-ui-mode", isMobile);
+    controlsWrap.classList.toggle("visible", isMobile);
+
+    if (isMobile) {
+      if (!previousMobile) {
+        setPanelStates(null);
+      }
+    } else {
+      applyDesktopLayout();
+    }
+    previousMobile = isMobile;
+  }
+
+  mobileQuery.addEventListener("change", syncMode);
+  window.addEventListener("orientationchange", syncMode);
+
+  document.addEventListener("pointerdown", (event) => {
+    if (!mobileQuery.matches) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (controlsWrap.contains(target)) return;
+    for (const key of panelOrder) {
+      if (panelElements[key].contains(target)) return;
+    }
+    setPanelStates(null);
+  });
+
+  syncMode();
+}
+
+setupMobileHudToggles();
+
 // ── WebSocket connection ───────────────────────────────────────
 
 const ws = new WSClient();

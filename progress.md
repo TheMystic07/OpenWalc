@@ -412,3 +412,44 @@ Original prompt: check innitIdea.md and i found this open source repoor @opencla
   - `output/web-game/ui-overlay-refresh/shot-1.png`
   - `output/web-game/ui-overlay-postchange/shot-0.png`
 - Repo search confirms no in-app source reference for "Clawhub Academy" remains in `src/`, `server/`, or `public/`.
+
+## Update 2026-02-15 (mobile-responsive HUD + label scaling)
+- Implemented mobile-first HUD toggles so world UI does not block gameplay on phones.
+- Added panel-level mobile open/close APIs:
+  - `src/ui/overlay.ts`
+  - `src/ui/battle-panel.ts`
+  - `src/ui/chat-log.ts`
+- Added centralized mobile panel controller in `src/main.ts`:
+  - Creates bottom toggle dock (`Agents`, `Battle`, `Chat`).
+  - Enables one-panel-at-a-time behavior on mobile.
+  - Closes open panel when tapping outside HUD.
+  - Restores always-visible desktop panel behavior when leaving mobile breakpoint.
+- Updated responsive styling in `src/style.css`:
+  - New floating mobile toggle dock styles.
+  - Off-canvas drawer behavior for overlay/battle/chat in `body.mobile-ui-mode`.
+  - Chat and battle open from different sides on mobile (battle left, chat right).
+  - Disabled chat fullscreen button on mobile to avoid full-screen blocking.
+- Updated in-game label readability for mobile in `src/style.css`:
+  - Smaller/clamped `.lobster-label`.
+  - Smaller/wrapped `.chat-bubble` and tail adjustment.
+  - Scaled combat overlays (`.combat-hp`, `.combat-stamina`, `.combat-intent`, `.damage-pop`, `.emote-bubble`).
+
+## Verification 2026-02-15
+- `npm run build` passed.
+- Ran develop-web-game Playwright client:
+  - URL: `http://localhost:3001/world.html`
+  - Artifacts: `output/web-game/mobile-responsive-desktop/shot-0.png`, `shot-1.png`, `state-0.json`, `state-1.json`
+  - No console/page error artifacts produced.
+- Ran dedicated mobile viewport Playwright checks (Pixel 7 emulation):
+  - `output/web-game/mobile-responsive-mobile/mobile-0-initial.png`
+  - `output/web-game/mobile-responsive-mobile/mobile-1-agents.png`
+  - `output/web-game/mobile-responsive-mobile/mobile-2-battle.png`
+  - `output/web-game/mobile-responsive-mobile/mobile-3-chat.png`
+  - `output/web-game/mobile-responsive-mobile/mobile-panel-state.json` confirms mobile mode + active chat toggle state.
+  - `output/web-game/mobile-responsive-mobile/mobile-errors.json` = `[]`.
+- Ran live in-world label + bubble mobile screenshot with spawned agent:
+  - `output/web-game/mobile-responsive-mobile/mobile-4-label-bubble.png`
+
+## TODO
+- Optional: add icon glyphs to mobile HUD buttons for faster scan at small sizes.
+- Optional: add swipe-to-dismiss gesture for mobile drawers.

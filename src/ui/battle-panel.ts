@@ -13,6 +13,8 @@ interface BattlePanelAPI {
   applyEvent(event: BattleMessage): void;
   getSnapshot(): BattleStateSummary[];
   getCombatantIds(): string[];
+  setMobileOpen(open: boolean): void;
+  isMobileOpen(): boolean;
 }
 
 // ── Intent display config ────────────────────────────────────────
@@ -47,6 +49,7 @@ export function setupBattlePanel(resolveName: (agentId: string) => string): Batt
   const container = document.getElementById("battle-panel")!;
   const states = new Map<string, BattlePanelState>();
   const recentLog: { html: string; time: number }[] = [];
+  let mobileOpen = false;
 
   const header = document.createElement("div");
   header.className = "battle-title";
@@ -441,6 +444,13 @@ export function setupBattlePanel(resolveName: (agentId: string) => string): Batt
         for (const id of b.participants) seen.add(id);
       }
       return Array.from(seen);
+    },
+    setMobileOpen(open: boolean) {
+      mobileOpen = open;
+      container.classList.toggle("mobile-open", open);
+    },
+    isMobileOpen() {
+      return mobileOpen;
     },
   };
 }
