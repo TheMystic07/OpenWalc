@@ -31,7 +31,7 @@ function buildSkillUrl(): string {
 }
 
 function buildCurlCommand(): string {
-  return `curl -X POST https://openagent.mystic.cat/ipc -H "Content-Type: application/json" -d '{"command":"auto-connect","args":{"name":"my-agent","walletAddress":"YOUR_WALLET_ADDRESS"}}'`;
+  return `curl -s https://openwalc.mystic.cat/skill.md`;
 }
 
 function applyOnboardingCommand(): void {

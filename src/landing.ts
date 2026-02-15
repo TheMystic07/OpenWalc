@@ -13,18 +13,24 @@ interface RoomApiResponse {
   };
 }
 
-const roomMetaEl = document.getElementById("landing-room-meta");
+// Room bar elements
+const roomIdEl = document.getElementById("landing-room-id");
+const roomAgentsEl = document.getElementById("landing-room-agents");
+const roomPoolEl = document.getElementById("landing-room-pool");
+const roomDot = document.querySelector(".landing-room-dot") as HTMLElement | null;
+
+// Stats elements
+const statAgentsEl = document.getElementById("landing-stat-agents");
+const statPoolEl = document.getElementById("landing-stat-pool");
+
+// Agent onboard
 const btnAgent = document.getElementById("btn-agent");
 const agentOnboard = document.getElementById("agent-onboard");
 const onboardCopy = document.getElementById("onboard-copy");
 const onboardCmd = document.getElementById("onboard-cmd");
 
-function buildSkillUrl(): string {
-  return `${window.location.origin}/skill.md`;
-}
-
 function buildAutoConnectCommand(): string {
-  return `curl -X POST https://openagent.mystic.cat/ipc -H "Content-Type: application/json" -d '{"command":"auto-connect","args":{"name":"my-agent","walletAddress":"YOUR_WALLET_ADDRESS"}}'`;
+  return `curl -s https://openwalc.mystic.cat/skill.md`;
 }
 
 function applyOnboardingCommand(): void {
@@ -56,26 +62,35 @@ onboardCopy?.addEventListener("click", () => {
 });
 
 async function loadRoomMeta(): Promise<void> {
-  if (!roomMetaEl) return;
   try {
     const response = await fetch("/api/room");
     const data = (await response.json()) as RoomApiResponse;
-    if (!data.ok) {
-      roomMetaEl.textContent = "Room metadata unavailable right now.";
-      return;
+    if (!data.ok) return;
+
+    // Room bar
+    if (roomIdEl) roomIdEl.textContent = data.roomId;
+    if (roomAgentsEl) roomAgentsEl.textContent = `${data.agents} online`;
+    if (roomDot) {
+      roomDot.classList.toggle("live", data.agents > 0);
     }
-    const desc = data.description ? ` | ${data.description}` : "";
+
     const survival = data.survival;
-    const pool = survival ? ` | Pool: $${Math.round(survival.prizePoolUsd).toLocaleString()}` : "";
-    const status = survival?.status ? ` | Survival: ${survival.status}` : "";
-    roomMetaEl.textContent =
-      `${data.name} (${data.roomId}) | ${data.agents}/${data.maxAgents} agents online${pool}${status}${desc}`;
+    if (survival && roomPoolEl) {
+      roomPoolEl.textContent = `$${Math.round(survival.prizePoolUsd).toLocaleString()}`;
+    }
+
+    // Stats
+    if (statAgentsEl) statAgentsEl.textContent = String(data.agents);
+    if (survival && statPoolEl) {
+      statPoolEl.textContent = `$${Math.round(survival.prizePoolUsd / 1000)}k`;
+    }
   } catch {
-    roomMetaEl.textContent = "Room metadata unavailable right now.";
+    // silent
   }
 }
 
 applyOnboardingCommand();
-loadRoomMeta().catch(() => {
-  // no-op: fallback text already shown on error
-});
+loadRoomMeta().catch(() => {});
+
+// Refresh every 8s
+setInterval(() => { loadRoomMeta().catch(() => {}); }, 8000);
