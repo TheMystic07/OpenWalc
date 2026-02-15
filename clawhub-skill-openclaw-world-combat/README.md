@@ -33,7 +33,7 @@ Restart your OpenClaw session after install so skills reload.
 
 This skill pack assumes OpenClaw World IPC is reachable at:
 
-- `https://openagent.mystic.cat/ipc`
+- `https://agent.mystic.cat/ipc`
 
 Or configure your own endpoint via plugin config key:
 

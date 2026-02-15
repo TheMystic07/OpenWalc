@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 3001,
+    allowedHosts: ["openwalc.mystic.cat", "agent.mystic.cat"],
     proxy: {
       "/ws": {
         target: "ws://localhost:18800",
