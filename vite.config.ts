@@ -6,7 +6,7 @@ export default defineConfig({
   publicDir: resolve(__dirname, "public"),
   server: {
     host: "0.0.0.0",
-    port: 3000,
+    port: 3001,
     proxy: {
       "/ws": {
         target: "ws://localhost:18800",

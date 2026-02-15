@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { resolve, extname, join } from "node:path";
 import { AgentRegistry } from "./agent-registry.js";
 import { WorldState, agentDistance } from "./world-state.js";
 import { NostrWorld } from "./nostr-world.js";
@@ -502,7 +502,7 @@ function registerAndJoinAgent(input: {
   };
   commandQueue.enqueue(joinMsg);
 
-  const previewUrl = `http://localhost:${process.env.VITE_PORT ?? "3000"}/world.html?agent=${encodeURIComponent(profile.agentId)}`;
+  const previewUrl = `http://localhost:${process.env.VITE_PORT ?? "3001"}/world.html?agent=${encodeURIComponent(profile.agentId)}`;
   return {
     ok: true,
     profile,
@@ -576,6 +576,49 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       tickRate: TICK_RATE,
       survival: getSurvivalSnapshot(),
     });
+  }
+
+  // ── Static file serving (production dist) ──────────────────
+  const distDir = resolve(import.meta.dirname ?? ".", "..", "dist");
+  if (method === "GET") {
+    const MIME: Record<string, string> = {
+      ".html": "text/html",
+      ".css": "text/css",
+      ".js": "application/javascript",
+      ".json": "application/json",
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".svg": "image/svg+xml",
+      ".ico": "image/x-icon",
+      ".woff": "font/woff",
+      ".woff2": "font/woff2",
+      ".glb": "model/gltf-binary",
+      ".gltf": "model/gltf+json",
+      ".md": "text/markdown",
+    };
+    // Clean the URL path (strip query/hash, prevent directory traversal)
+    const cleanPath = decodeURIComponent(url.split("?")[0].split("#")[0]);
+    const safePath = cleanPath.replace(/\.\./g, "");
+    // Try exact file, then file + .html, then index.html for /
+    const candidates = [
+      join(distDir, safePath),
+      ...(safePath.endsWith("/") || safePath === "/" ? [join(distDir, safePath, "index.html")] : []),
+      ...(extname(safePath) === "" ? [join(distDir, safePath + ".html")] : []),
+    ];
+    for (const filePath of candidates) {
+      try {
+        if (existsSync(filePath) && statSync(filePath).isFile()) {
+          const ext = extname(filePath);
+          const mime = MIME[ext] ?? "application/octet-stream";
+          const content = readFileSync(filePath);
+          res.writeHead(200, { "Content-Type": mime, "Content-Length": content.length });
+          res.end(content);
+          return;
+        }
+      } catch {
+        // fall through
+      }
+    }
   }
 
   json(res, 404, { error: "Not found" });
