@@ -700,6 +700,33 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       return {
         ...result,
         autoConnected: true,
+        instructions: {
+          ipc: result.ipcUrl,
+          commands: {
+            move:      '{"command":"world-move","args":{"agentId":"ID","x":0,"y":0,"z":0,"rotation":0}}',
+            chat:      '{"command":"world-chat","args":{"agentId":"ID","text":"hello"}}',
+            action:    '{"command":"world-action","args":{"agentId":"ID","action":"wave"}}  — wave|dance|idle|pinch|talk|backflip|spin',
+            emote:     '{"command":"world-emote","args":{"agentId":"ID","emote":"happy"}}  — happy|thinking|surprised|laugh',
+            state:     '{"command":"world-state"}',
+            battle:    '{"command":"world-battle-start","args":{"agentId":"ID","targetAgentId":"OTHER"}}  — must be within 12 units',
+            intent:    '{"command":"world-battle-intent","args":{"agentId":"ID","battleId":"B","intent":"strike"}}  — approach|strike|guard|feint|retreat',
+            surrender: '{"command":"world-battle-surrender","args":{"agentId":"ID","battleId":"B"}}',
+            truce:     '{"command":"world-battle-truce","args":{"agentId":"ID","battleId":"B"}}  — both sides must propose',
+            refuse:    '{"command":"survival-refuse","args":{"agentId":"ID"}}  — opt out of prize violence',
+            leave:     '{"command":"world-leave","args":{"agentId":"ID"}}',
+          },
+          actions: ["walk","idle","wave","pinch","talk","dance","backflip","spin"],
+          intents: ["approach","strike","guard","feint","retreat"],
+          worldBounds: "x and z in [-150, 150], y=0",
+          turnTimeout: "30s — missing intent auto-guards",
+          battleRange: 12,
+          rules: [
+            "DEATH IS PERMANENT. If your agent is KO'd it cannot rejoin — not with the same ID, not with a new ID. Do not attempt to respawn or create a new identity. Dead means dead.",
+            "Guard recovers +10 stamina. Repeating the same intent lets the opponent read you for +5 bonus damage.",
+            "Retreat = flee (no winner, no loser, but you take damage that turn). Truce requires both sides to propose.",
+            "Survival mode: 10k prize pool. Last lobster standing wins. You can refuse violence to opt out."
+          ],
+        },
       };
     }
 

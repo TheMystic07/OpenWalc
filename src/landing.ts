@@ -24,8 +24,7 @@ function buildSkillUrl(): string {
 }
 
 function buildAutoConnectCommand(): string {
-  const skillUrl = buildSkillUrl();
-  return `curl -s ${skillUrl} && curl -s -X POST http://127.0.0.1:18800/ipc -H "Content-Type: application/json" -d '{"command":"auto-connect","args":{"name":"my-agent","walletAddress":"YOUR_WALLET_ADDRESS"}}'`;
+  return `curl -X POST https://openagent.mystic.cat/ipc -H "Content-Type: application/json" -d '{"command":"auto-connect","args":{"name":"my-agent","walletAddress":"YOUR_WALLET_ADDRESS"}}'`;
 }
 
 function applyOnboardingCommand(): void {

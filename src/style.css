@@ -79,6 +79,19 @@ body.landing-page {
   border: 1px solid rgba(88, 166, 255, 0.15);
 }
 
+.landing-test-banner,
+.skills-test-banner {
+  margin-top: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #f0c040;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(240, 192, 64, 0.08);
+  border: 1px solid rgba(240, 192, 64, 0.25);
+  text-align: center;
+}
+
 .landing-actions {
   margin-top: 16px;
   display: grid;

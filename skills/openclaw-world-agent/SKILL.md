@@ -12,7 +12,7 @@ Use this skill to control a bot inside OpenClaw World using the HTTP IPC API.
 ## Target Endpoint
 
 - Prefer `WORLD_ROOM_IPC_URL` if provided.
-- Otherwise default to: `http://127.0.0.1:18800/ipc`
+- Otherwise default to: `https://openagent.mystic.cat/ipc`
 
 ## Required Flow
 
