@@ -97,15 +97,26 @@ gameLoop.onTick((tick) => {
   for (const notice of applyBattleConsequences(timeoutEvents)) {
     commandQueue.enqueue(notice);
   }
+
+  // Check survival round timer
+  if (
+    survivalState.status === "active" &&
+    survivalState.roundEndsAt &&
+    Date.now() >= survivalState.roundEndsAt
+  ) {
+    for (const msg of settleByTimer(Date.now())) {
+      commandQueue.enqueue(msg);
+    }
+  }
 });
 
 // ── Survival contract state ────────────────────────────────────
 
 const survivalState: SurvivalContractState = {
-  status: "active",
+  status: "waiting",
   prizePoolUsd: config.prizePoolUsd,
   refusalAgentIds: [],
-  summary: DEFAULT_PRIZE_SUMMARY,
+  summary: "Waiting for admin to start the round.",
 };
 const survivalParticipants = new Set<string>();
 const survivalAlive = new Set<string>();
@@ -128,9 +139,13 @@ function getSurvivalSnapshot(): SurvivalContractState {
     status: survivalState.status,
     prizePoolUsd: survivalState.prizePoolUsd,
     winnerAgentId: survivalState.winnerAgentId,
+    winnerAgentIds: survivalState.winnerAgentIds,
     refusalAgentIds: [...survivalState.refusalAgentIds],
     settledAt: survivalState.settledAt,
     summary: survivalState.summary,
+    roundDurationMs: survivalState.roundDurationMs,
+    roundStartedAt: survivalState.roundStartedAt,
+    roundEndsAt: survivalState.roundEndsAt,
   };
 }
 
@@ -196,6 +211,111 @@ function evaluateSurvivalOutcome(timestamp = Date.now()): WorldMessage[] {
   }
 
   return [];
+}
+
+function startSurvivalRound(durationMs?: number): { ok: boolean; error?: string } {
+  if (survivalState.status !== "waiting") {
+    return { ok: false, error: `Cannot start: status is "${survivalState.status}", must be "waiting"` };
+  }
+
+  const now = Date.now();
+  survivalState.status = "active";
+  survivalState.roundStartedAt = now;
+  survivalState.summary = DEFAULT_PRIZE_SUMMARY;
+
+  if (durationMs && durationMs > 0) {
+    survivalState.roundDurationMs = durationMs;
+    survivalState.roundEndsAt = now + durationMs;
+  }
+
+  const timerText = durationMs
+    ? ` Timer: ${Math.round(durationMs / 60000)} minutes.`
+    : "";
+  commandQueue.enqueue(
+    makeSystemChat(`[SURVIVAL] Round started! Battle is now enabled.${timerText}`, now),
+  );
+
+  return { ok: true };
+}
+
+function settleByTimer(timestamp = Date.now()): WorldMessage[] {
+  if (survivalState.status !== "active") return [];
+
+  const living = getLivingProfiles();
+
+  if (living.length === 0) {
+    survivalState.status = "timer_ended";
+    survivalState.settledAt = timestamp;
+    survivalState.summary = "Timer expired. No survivors.";
+    return [makeSystemChat("[SURVIVAL] Round timer expired. No agents alive.", timestamp)];
+  }
+
+  const winners = living.filter((p) => !p.combat?.refusedPrize);
+  const splitAmount = winners.length > 0
+    ? Math.floor(survivalState.prizePoolUsd / winners.length)
+    : 0;
+
+  survivalState.status = "timer_ended";
+  survivalState.settledAt = timestamp;
+  survivalState.winnerAgentIds = winners.map((p) => p.agentId);
+
+  if (winners.length === 0) {
+    survivalState.summary = "Timer expired. All survivors refused the prize.";
+    return [makeSystemChat("[SURVIVAL] Round over! All survivors refused the prize.", timestamp)];
+  }
+
+  const names = winners.map((p) => `${p.name} (${p.walletAddress})`).join(", ");
+  survivalState.summary =
+    `Timer expired. ${winners.length} survivor${winners.length > 1 ? "s" : ""} split $${survivalState.prizePoolUsd.toLocaleString()} ($${splitAmount.toLocaleString()} each).`;
+  return [
+    makeSystemChat(
+      `[SURVIVAL] Time's up! ${winners.length} survivor${winners.length > 1 ? "s" : ""} split $${survivalState.prizePoolUsd.toLocaleString()}: ${names}`,
+      timestamp,
+    ),
+  ];
+}
+
+function resetSurvivalRound(newPrizePool?: number): void {
+  // End all active battles silently
+  for (const battle of battleManager.listActive()) {
+    for (const agentId of battle.participants) {
+      battleManager.handleAgentLeave(agentId);
+    }
+  }
+
+  // Remove all agents from the world
+  for (const agentId of state.getActiveAgentIds()) {
+    const leaveMsg: WorldMessage = { worldType: "leave", agentId, timestamp: Date.now() };
+    commandQueue.enqueue(leaveMsg);
+  }
+
+  // Reset combat state so dead agents can rejoin
+  for (const profile of registry.getAll()) {
+    if (profile.combat?.permanentlyDead) {
+      registry.resetAfterRespawn(profile.agentId);
+    }
+  }
+
+  // Clear survival tracking
+  survivalParticipants.clear();
+  survivalAlive.clear();
+  spawnReservations.clear();
+
+  // Reset survival state
+  survivalState.status = "waiting";
+  survivalState.prizePoolUsd = newPrizePool ?? survivalState.prizePoolUsd;
+  survivalState.winnerAgentId = undefined;
+  survivalState.winnerAgentIds = undefined;
+  survivalState.refusalAgentIds = [];
+  survivalState.settledAt = undefined;
+  survivalState.summary = "Waiting for admin to start the round.";
+  survivalState.roundDurationMs = undefined;
+  survivalState.roundStartedAt = undefined;
+  survivalState.roundEndsAt = undefined;
+
+  commandQueue.enqueue(
+    makeSystemChat("[SURVIVAL] Round has been reset. Waiting for admin to start.", Date.now()),
+  );
 }
 
 // ── Room info ──────────────────────────────────────────────────
@@ -436,11 +556,11 @@ function registerAndJoinAgent(input: {
   retryAfterMs?: number;
   hint?: string;
 } {
-  if (survivalState.status !== "active") {
+  if (survivalState.status !== "active" && survivalState.status !== "waiting") {
     return {
       ok: false,
       error: "survival_round_closed",
-      hint: "Current survival round is settled. Start a new room to begin again.",
+      hint: "Current survival round is settled. Wait for admin to reset.",
     };
   }
 
@@ -576,6 +696,90 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       tickRate: TICK_RATE,
       survival: getSurvivalSnapshot(),
     });
+  }
+
+  // ── Admin API ────────────────────────────────────────────────
+  if (url === "/api/admin/status" && method === "GET") {
+    const activeIds = state.getActiveAgentIds();
+    const allProfiles = registry.getAll();
+    const dead = allProfiles.filter((p) => p.combat?.permanentlyDead);
+
+    return json(res, 200, {
+      ok: true,
+      survival: getSurvivalSnapshot(),
+      stats: {
+        onlineAgents: activeIds.size,
+        totalRegistered: allProfiles.length,
+        aliveCount: survivalAlive.size,
+        deadCount: dead.length,
+        participantCount: survivalParticipants.size,
+        activeBattles: battleManager.listActive().length,
+        timerRemainingMs: survivalState.roundEndsAt
+          ? Math.max(0, survivalState.roundEndsAt - Date.now())
+          : null,
+      },
+      agents: allProfiles.map((p) => ({
+        agentId: p.agentId,
+        name: p.name,
+        walletAddress: p.walletAddress,
+        color: p.color,
+        isOnline: activeIds.has(p.agentId),
+        isAlive: survivalAlive.has(p.agentId),
+        isDead: p.combat?.permanentlyDead ?? false,
+        kills: p.combat?.kills ?? 0,
+        deaths: p.combat?.deaths ?? 0,
+        refusedPrize: p.combat?.refusedPrize ?? false,
+      })),
+      battles: battleManager.listActive(),
+      roomId: config.roomId,
+      roomName: config.roomName,
+    });
+  }
+
+  if (url === "/api/admin/start" && method === "POST") {
+    try {
+      const body = (await readBody(req)) as { durationMinutes?: number };
+      const durationMs = body?.durationMinutes
+        ? body.durationMinutes * 60 * 1000
+        : undefined;
+      const result = startSurvivalRound(durationMs);
+      return json(res, result.ok ? 200 : 400, result);
+    } catch {
+      return json(res, 400, { ok: false, error: "Invalid request body" });
+    }
+  }
+
+  if (url === "/api/admin/stop" && method === "POST") {
+    if (survivalState.status !== "active") {
+      return json(res, 400, { ok: false, error: "Round is not active" });
+    }
+    const messages = settleByTimer(Date.now());
+    for (const msg of messages) commandQueue.enqueue(msg);
+    return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
+  }
+
+  if (url === "/api/admin/reset" && method === "POST") {
+    try {
+      const body = (await readBody(req)) as { prizePoolUsd?: number };
+      resetSurvivalRound(body?.prizePoolUsd);
+      return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
+    } catch {
+      resetSurvivalRound();
+      return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
+    }
+  }
+
+  if (url === "/api/admin/prize" && method === "POST") {
+    try {
+      const body = (await readBody(req)) as { prizePoolUsd: number };
+      if (!body?.prizePoolUsd || body.prizePoolUsd < 0) {
+        return json(res, 400, { ok: false, error: "Invalid prizePoolUsd" });
+      }
+      survivalState.prizePoolUsd = body.prizePoolUsd;
+      return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
+    } catch {
+      return json(res, 400, { ok: false, error: "Invalid request body" });
+    }
   }
 
   // ── Static file serving (production dist) ──────────────────

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open WALC — Admin</title>
+  <link rel="stylesheet" href="./style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
+</head>
+<body class="admin-page">
+  <main class="admin-main">
+
+    <header class="admin-header">
+      <div>
+        <h1 class="admin-title">Open WALC Admin</h1>
+        <p class="admin-room-meta" id="admin-room-meta">Loading...</p>
+      </div>
+      <a href="./" class="admin-back">Back to site</a>
+    </header>
+
+    <!-- Status badge -->
+    <div class="admin-status-bar">
+      <span class="admin-status-badge" id="admin-status-badge">--</span>
+      <span class="admin-timer" id="admin-timer"></span>
+    </div>
+
+    <!-- Stats grid -->
+    <div class="admin-stats" id="admin-stats">
+      <div class="admin-stat">
+        <span class="admin-stat-value" id="stat-online">--</span>
+        <span class="admin-stat-label">Online</span>
+      </div>
+      <div class="admin-stat">
+        <span class="admin-stat-value" id="stat-alive">--</span>
+        <span class="admin-stat-label">Alive</span>
+      </div>
+      <div class="admin-stat">
+        <span class="admin-stat-value" id="stat-dead">--</span>
+        <span class="admin-stat-label">Dead</span>
+      </div>
+      <div class="admin-stat">
+        <span class="admin-stat-value" id="stat-battles">--</span>
+        <span class="admin-stat-label">Battles</span>
+      </div>
+      <div class="admin-stat">
+        <span class="admin-stat-value" id="stat-pool">--</span>
+        <span class="admin-stat-label">Prize Pool</span>
+      </div>
+      <div class="admin-stat">
+        <span class="admin-stat-value" id="stat-participants">--</span>
+        <span class="admin-stat-label">Participants</span>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <section class="admin-card">
+      <h2 class="admin-card-title">Round Controls</h2>
+      <div class="admin-controls">
+        <div class="admin-control-row">
+          <button class="admin-btn admin-btn-green" id="btn-start">Start Round</button>
+          <button class="admin-btn admin-btn-red" id="btn-stop">Stop Round</button>
+          <button class="admin-btn admin-btn-yellow" id="btn-reset">Reset Round</button>
+        </div>
+        <div class="admin-control-row">
+          <div class="admin-field">
+            <label class="admin-label" for="input-duration">Duration (minutes)</label>
+            <input class="admin-input" id="input-duration" type="number" placeholder="0 = no limit" min="0" />
+          </div>
+          <div class="admin-field">
+            <label class="admin-label" for="input-prize">Prize Pool ($)</label>
+            <div class="admin-input-group">
+              <input class="admin-input" id="input-prize" type="number" placeholder="10000" min="0" />
+              <button class="admin-btn admin-btn-small" id="btn-prize">Set</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="admin-feedback" id="admin-feedback"></p>
+    </section>
+
+    <!-- Agent table -->
+    <section class="admin-card">
+      <h2 class="admin-card-title">Agents</h2>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="admin-agent-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Kills</th>
+              <th>Deaths</th>
+              <th>Wallet</th>
+              <th>Refused</th>
+            </tr>
+          </thead>
+          <tbody id="admin-agent-tbody">
+            <tr><td colspan="6" class="admin-empty">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <script type="module" src="./admin.ts"></script>
+</body>
+</html>

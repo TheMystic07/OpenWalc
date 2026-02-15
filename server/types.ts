@@ -181,15 +181,19 @@ export interface RoomInfoMessage {
   survival: SurvivalContractState;
 }
 
-export type SurvivalStatus = "active" | "winner" | "refused";
+export type SurvivalStatus = "waiting" | "active" | "winner" | "refused" | "timer_ended";
 
 export interface SurvivalContractState {
   status: SurvivalStatus;
   prizePoolUsd: number;
   winnerAgentId?: string;
+  winnerAgentIds?: string[];
   refusalAgentIds: string[];
   settledAt?: number;
   summary?: string;
+  roundDurationMs?: number;
+  roundStartedAt?: number;
+  roundEndsAt?: number;
 }
 
 // ── WebSocket messages (server ↔ browser) ──────────────────────

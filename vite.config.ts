@@ -27,6 +27,7 @@ export default defineConfig({
         landing: resolve(__dirname, "src/index.html"),
         world: resolve(__dirname, "src/world.html"),
         skills: resolve(__dirname, "src/skills.html"),
+        admin: resolve(__dirname, "src/admin.html"),
       },
     },
   },
