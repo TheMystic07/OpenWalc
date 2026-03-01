@@ -40,6 +40,13 @@ describe("CommandQueue", () => {
   });
 
   describe("bounds check", () => {
+    it("rejects non-finite position payload", () => {
+      const badMove = makeMove("a1", Number.NaN, 0);
+      const result = queue.enqueue(badMove);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("invalid_position");
+    });
+
     it("rejects out-of-bounds x", () => {
       const result = queue.enqueue(makeMove("a1", 160, 0));
       expect(result.ok).toBe(false);
@@ -91,6 +98,18 @@ describe("CommandQueue", () => {
       const result = queue.enqueue(makeChat("a1", text));
       expect(result.ok).toBe(true);
     });
+
+    it("rejects invalid timestamp payloads", () => {
+      const invalidTs = {
+        worldType: "chat",
+        agentId: "a1",
+        text: "hello",
+        timestamp: Number.NaN,
+      } as unknown as WorldMessage;
+      const result = queue.enqueue(invalidTs);
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("invalid_timestamp");
+    });
   });
 
   describe("rate limiting", () => {
@@ -117,6 +136,26 @@ describe("CommandQueue", () => {
       // Different agent should not be rate limited
       const result = queue.enqueue(makeMove("a2", 0, 0));
       expect(result.ok).toBe(true);
+    });
+  });
+
+  describe("queue capacity", () => {
+    it("rejects commands after queue reaches max capacity", () => {
+      for (let i = 0; i < 10_000; i++) {
+        const result = queue.enqueue({
+          worldType: "leave",
+          agentId: `a${i}`,
+          timestamp: Date.now(),
+        });
+        expect(result.ok).toBe(true);
+      }
+      const overflow = queue.enqueue({
+        worldType: "leave",
+        agentId: "overflow-agent",
+        timestamp: Date.now(),
+      });
+      expect(overflow.ok).toBe(false);
+      expect(overflow.reason).toBe("queue_full");
     });
   });
 });

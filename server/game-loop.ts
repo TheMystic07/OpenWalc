@@ -18,6 +18,7 @@ export class GameLoop {
   private tickCount = 0;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private tickHooks: Array<(tickCount: number) => void> = [];
+  private eventHooks: Array<(events: WorldMessage[]) => void> = [];
 
   /** Events that happened this tick — broadcast to relevant clients */
   private tickEvents: WorldMessage[] = [];
@@ -33,6 +34,11 @@ export class GameLoop {
   /** Register a function called every tick */
   onTick(hook: (tickCount: number) => void): void {
     this.tickHooks.push(hook);
+  }
+
+  /** Register a function called with each tick's events after they are applied */
+  onEvents(hook: (events: WorldMessage[]) => void): void {
+    this.eventHooks.push(hook);
   }
 
   get currentTick(): number {
@@ -57,8 +63,12 @@ export class GameLoop {
       this.tickEvents = [];
 
       // 0. Run registered tick hooks
-      for (const hook of this.tickHooks) {
-        hook(this.tickCount);
+      for (const [index, hook] of this.tickHooks.entries()) {
+        try {
+          hook(this.tickCount);
+        } catch (err) {
+          console.error(`[game] tick hook #${index + 1} failed on tick ${this.tickCount}:`, err);
+        }
       }
 
       // 1. Drain pending commands from the queue
@@ -66,18 +76,36 @@ export class GameLoop {
 
       // 2. Apply commands to world state, collect events
       for (const cmd of commands) {
-        this.worldState.apply(cmd);
-        this.tickEvents.push(cmd);
+        try {
+          this.worldState.apply(cmd);
+          this.tickEvents.push(cmd);
 
-        // Clean up rate-limit bucket when agent leaves
-        if (cmd.worldType === "leave") {
-          this.commandQueue.pruneAgent(cmd.agentId);
+          // Clean up rate-limit bucket when agent leaves
+          if (cmd.worldType === "leave") {
+            this.commandQueue.pruneAgent(cmd.agentId);
+          }
+
+          // Publish to Nostr relay (non-blocking)
+          this.nostr.publish(cmd).catch((err) => {
+            console.warn("[game] Nostr publish error:", err);
+          });
+        } catch (err) {
+          console.error(
+            `[game] Failed to apply command ${cmd.worldType} for ${cmd.agentId} on tick ${this.tickCount}:`,
+            err,
+          );
         }
+      }
 
-        // Publish to Nostr relay (non-blocking)
-        this.nostr.publish(cmd).catch((err) => {
-          console.warn("[game] Nostr publish error:", err);
-        });
+      // 2b. Fire event hooks for persistence / side-effects
+      if (this.tickEvents.length > 0) {
+        for (const [index, hook] of this.eventHooks.entries()) {
+          try {
+            hook(this.tickEvents);
+          } catch (err) {
+            console.error(`[game] event hook #${index + 1} failed on tick ${this.tickCount}:`, err);
+          }
+        }
       }
 
       // 3. Rebuild spatial index from current positions
@@ -150,12 +178,20 @@ export class GameLoop {
     );
 
     for (const event of this.tickEvents) {
+      // Whisper events are intentionally not broadcast via the public stream.
+      if (event.worldType === "whisper") continue;
+
       // Global events always sent regardless of distance
       const isGlobal =
         event.worldType === "join" ||
         event.worldType === "leave" ||
         event.worldType === "profile" ||
-        event.worldType === "battle";
+        event.worldType === "battle" ||
+        event.worldType === "alliance" ||
+        event.worldType === "phase" ||
+        event.worldType === "territory" ||
+        event.worldType === "bet" ||
+        event.worldType === "zone_damage";
 
       // Chat & emote are proximity-filtered: only viewers near the speaker
       const isSpatialMessage =

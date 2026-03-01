@@ -3,6 +3,8 @@ import { WORLD_SIZE, type WorldMessage } from "./types.js";
 /** Max agent commands per second (rate limit) */
 const MAX_CMD_RATE = 20;
 const RATE_WINDOW_MS = 1000;
+const MAX_PENDING_COMMANDS = 10_000;
+const MAX_CHAT_LENGTH = 500;
 
 /** World half-size (bounds check) */
 const WORLD_HALF = WORLD_SIZE / 2;
@@ -33,6 +35,13 @@ export class CommandQueue {
    * The game loop drains the queue each tick.
    */
   enqueue(msg: WorldMessage): { ok: boolean; reason?: string } {
+    if (typeof msg.agentId !== "string" || msg.agentId.trim().length === 0) {
+      return { ok: false, reason: "invalid_agent_id" };
+    }
+    if (!Number.isFinite(msg.timestamp)) {
+      return { ok: false, reason: "invalid_timestamp" };
+    }
+
     // Rate limit only high-frequency player actions.
     const isRateLimitedType =
       msg.worldType === "position" ||
@@ -45,6 +54,15 @@ export class CommandQueue {
 
     // Validate position commands
     if (msg.worldType === "position") {
+      if (
+        !Number.isFinite(msg.x) ||
+        !Number.isFinite(msg.y) ||
+        !Number.isFinite(msg.z) ||
+        !Number.isFinite(msg.rotation)
+      ) {
+        return { ok: false, reason: "invalid_position" };
+      }
+
       // Bounds check
       if (Math.abs(msg.x) > WORLD_HALF || Math.abs(msg.z) > WORLD_HALF) {
         return { ok: false, reason: "out_of_bounds" };
@@ -63,9 +81,16 @@ export class CommandQueue {
 
     // Chat text length limit
     if (msg.worldType === "chat") {
-      if (msg.text.length > 500) {
+      if (typeof msg.text !== "string") {
+        return { ok: false, reason: "invalid_text" };
+      }
+      if (msg.text.length > MAX_CHAT_LENGTH) {
         return { ok: false, reason: "text_too_long" };
       }
+    }
+
+    if (this.pending.length >= MAX_PENDING_COMMANDS) {
+      return { ok: false, reason: "queue_full" };
     }
 
     this.pending.push(msg);
