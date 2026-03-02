@@ -7,6 +7,14 @@ import type { WorldMessage, AgentState, WSServerMessage } from "./types.js";
 import { CHAT_RANGE } from "./types.js";
 import type { NostrWorld } from "./nostr-world.js";
 
+interface EncodedTickEvent {
+  event: WorldMessage;
+  json: string;
+  isGlobal: boolean;
+  isSpatialMessage: boolean;
+  speakerPos?: { x: number; z: number };
+}
+
 /** Server tick rate in Hz */
 export const TICK_RATE = 20;
 const TICK_MS = 1000 / TICK_RATE;
@@ -124,19 +132,24 @@ export class GameLoop {
 
       // 5. Send updates to each client (AOI-filtered)
       const isFullSnapshotTick = this.tickCount % FULL_SNAPSHOT_INTERVAL === 0;
+      const encodedTickEvents = this.encodeTickEvents();
+      let cachedSnapshot: AgentState[] | null = null;
 
       for (const client of this.clientManager.getAllClients()) {
         if (client.ws.readyState !== WebSocket.OPEN) continue;
 
         const isFirstSnapshot = client.lastAckTick === 0;
         if (isFullSnapshotTick || isFirstSnapshot) {
+          if (!cachedSnapshot) {
+            cachedSnapshot = this.worldState.snapshot();
+          }
           // First snapshot is unfiltered so client sees ALL agents
-          this.sendSnapshot(client, isFirstSnapshot);
+          this.sendSnapshot(client, cachedSnapshot, isFirstSnapshot);
           if (isFirstSnapshot) {
             client.lastAckTick = this.tickCount;
           }
         } else {
-          this.sendTickEvents(client);
+          this.sendTickEvents(client, encodedTickEvents);
         }
       }
     } catch (err) {
@@ -145,9 +158,11 @@ export class GameLoop {
   }
 
   /** Send snapshot to a client. First snapshot is unfiltered; subsequent are AOI-filtered. */
-  private sendSnapshot(client: { ws: WebSocket; viewX: number; viewZ: number }, unfiltered = false): void {
-    const allStates = this.worldState.snapshot();
-
+  private sendSnapshot(
+    client: { ws: WebSocket; viewX: number; viewZ: number },
+    allStates: AgentState[],
+    unfiltered = false,
+  ): void {
     let agents: typeof allStates;
     if (unfiltered) {
       agents = allStates;
@@ -168,8 +183,11 @@ export class GameLoop {
   }
 
   /** Send only this tick's events that are within client's AOI */
-  private sendTickEvents(client: { ws: WebSocket; viewX: number; viewZ: number }): void {
-    if (this.tickEvents.length === 0) return;
+  private sendTickEvents(
+    client: { ws: WebSocket; viewX: number; viewZ: number },
+    encodedTickEvents: EncodedTickEvent[],
+  ): void {
+    if (encodedTickEvents.length === 0) return;
 
     const nearbyAgents = this.spatialGrid.queryRadius(
       client.viewX,
@@ -177,11 +195,32 @@ export class GameLoop {
       AOI_RADIUS
     );
 
+    for (const encoded of encodedTickEvents) {
+      if (encoded.isSpatialMessage) {
+        // Deliver chat/emote only to clients whose viewport is near the speaker
+        const speakerPos = encoded.speakerPos;
+        if (speakerPos) {
+          const dx = client.viewX - speakerPos.x;
+          const dz = client.viewZ - speakerPos.z;
+          const dist = Math.sqrt(dx * dx + dz * dz);
+          if (dist <= CHAT_RANGE + AOI_RADIUS) {
+            this.safeSendRaw(client.ws, encoded.json);
+          }
+        }
+      } else if (encoded.isGlobal || nearbyAgents.has(encoded.event.agentId)) {
+        this.safeSendRaw(client.ws, encoded.json);
+      }
+    }
+  }
+
+  private encodeTickEvents(): EncodedTickEvent[] {
+    if (this.tickEvents.length === 0) return [];
+
+    const encoded: EncodedTickEvent[] = [];
     for (const event of this.tickEvents) {
       // Whisper events are intentionally not broadcast via the public stream.
       if (event.worldType === "whisper") continue;
 
-      // Global events always sent regardless of distance
       const isGlobal =
         event.worldType === "join" ||
         event.worldType === "leave" ||
@@ -193,34 +232,31 @@ export class GameLoop {
         event.worldType === "bet" ||
         event.worldType === "zone_damage";
 
-      // Chat & emote are proximity-filtered: only viewers near the speaker
-      const isSpatialMessage =
-        event.worldType === "chat" || event.worldType === "emote";
+      const isSpatialMessage = event.worldType === "chat" || event.worldType === "emote";
+      const speakerPos = isSpatialMessage ? this.worldState.getPosition(event.agentId) : undefined;
 
-      if (isSpatialMessage) {
-        // Deliver chat/emote only to clients whose viewport is near the speaker
-        const speakerPos = this.worldState.getPosition(event.agentId);
-        if (speakerPos) {
-          const dx = client.viewX - speakerPos.x;
-          const dz = client.viewZ - speakerPos.z;
-          const dist = Math.sqrt(dx * dx + dz * dz);
-          if (dist <= CHAT_RANGE + AOI_RADIUS) {
-            const msg: WSServerMessage = { type: "world", message: event };
-            this.safeSend(client.ws, msg);
-          }
-        }
-      } else if (isGlobal || nearbyAgents.has(event.agentId)) {
-        const msg: WSServerMessage = { type: "world", message: event };
-        this.safeSend(client.ws, msg);
-      }
+      encoded.push({
+        event,
+        json: JSON.stringify({ type: "world", message: event } satisfies WSServerMessage),
+        isGlobal,
+        isSpatialMessage,
+        speakerPos: speakerPos ? { x: speakerPos.x, z: speakerPos.z } : undefined,
+      });
     }
+
+    return encoded;
   }
 
   /** Safe JSON send — never throws */
   private safeSend(ws: WebSocket, msg: WSServerMessage): void {
+    this.safeSendRaw(ws, JSON.stringify(msg));
+  }
+
+  /** Safe raw send — never throws */
+  private safeSendRaw(ws: WebSocket, raw: string): void {
     try {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(msg));
+        ws.send(raw);
       }
     } catch (err) {
       console.warn("[game] Send error:", err);

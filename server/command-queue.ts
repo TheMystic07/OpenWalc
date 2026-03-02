@@ -3,6 +3,8 @@ import { WORLD_SIZE, type WorldMessage } from "./types.js";
 /** Max agent commands per second (rate limit) */
 const MAX_CMD_RATE = 20;
 const RATE_WINDOW_MS = 1000;
+const RATE_BUCKET_STALE_MS = RATE_WINDOW_MS * 5;
+const RATE_CLEANUP_EVERY = 256;
 const MAX_PENDING_COMMANDS = 10_000;
 const MAX_CHAT_LENGTH = 500;
 
@@ -20,8 +22,9 @@ export class CommandQueue {
   /** Pending commands to be consumed by the game loop */
   private pending: WorldMessage[] = [];
 
-  /** Rate limit tracking: agentId → timestamps of recent commands */
-  private rateBuckets = new Map<string, number[]>();
+  /** Rate limit tracking: agentId → timestamps + read head for O(1)-ish pruning */
+  private rateBuckets = new Map<string, { timestamps: number[]; head: number; lastSeen: number }>();
+  private rateChecks = 0;
 
   /** Known obstacles for collision validation */
   private obstacles: Obstacle[] = [];
@@ -109,22 +112,45 @@ export class CommandQueue {
     const now = Date.now();
     let bucket = this.rateBuckets.get(agentId);
     if (!bucket) {
-      bucket = [];
+      bucket = { timestamps: [], head: 0, lastSeen: now };
       this.rateBuckets.set(agentId, bucket);
     }
 
     // Remove old timestamps outside the window
     const cutoff = now - RATE_WINDOW_MS;
-    while (bucket.length > 0 && bucket[0] < cutoff) {
-      bucket.shift();
+    while (bucket.head < bucket.timestamps.length && bucket.timestamps[bucket.head] < cutoff) {
+      bucket.head += 1;
     }
 
-    if (bucket.length >= MAX_CMD_RATE) {
+    if (bucket.timestamps.length - bucket.head >= MAX_CMD_RATE) {
+      bucket.lastSeen = now;
       return false;
     }
 
-    bucket.push(now);
+    bucket.timestamps.push(now);
+    bucket.lastSeen = now;
+
+    // Compact periodically so arrays do not grow forever.
+    if (bucket.head > 32 && bucket.head * 2 >= bucket.timestamps.length) {
+      bucket.timestamps = bucket.timestamps.slice(bucket.head);
+      bucket.head = 0;
+    }
+
+    this.rateChecks += 1;
+    if (this.rateChecks % RATE_CLEANUP_EVERY === 0) {
+      this.pruneStaleRateBuckets(now);
+    }
+
     return true;
+  }
+
+  private pruneStaleRateBuckets(now: number): void {
+    const staleCutoff = now - RATE_BUCKET_STALE_MS;
+    for (const [agentId, bucket] of this.rateBuckets.entries()) {
+      if (bucket.lastSeen < staleCutoff) {
+        this.rateBuckets.delete(agentId);
+      }
+    }
   }
 
   /** Remove rate-limit bucket for an agent that has left */

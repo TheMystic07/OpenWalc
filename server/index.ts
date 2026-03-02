@@ -16,6 +16,7 @@ import { BettingManager, type PayoutReport } from "./betting-manager.js";
 import { ReputationManager } from "./reputation-manager.js";
 import { NeonBetStore } from "./neon-bet-store.js";
 import { NeonEventStore, type StoredEventType } from "./neon-event-store.js";
+import { NeonRuntimeStore, type RuntimeStateSnapshot } from "./neon-runtime-store.js";
 import { SolanaTransferService } from "./solana-transfer.js";
 import { TokenMarketService } from "./token-market.js";
 import { loadRoomConfig } from "./room-config.js";
@@ -28,10 +29,17 @@ import type {
   BattleIntent,
   BattleMessage,
   SurvivalContractState,
+  SurvivalRoundSummary,
   PhaseMessage,
   AllianceMessage,
 } from "./types.js";
 import { WORLD_SIZE, BATTLE_RANGE, CHAT_RANGE } from "./types.js";
+
+try {
+  process.loadEnvFile();
+} catch {
+  // Local .env is optional in production/deployment environments.
+}
 
 const SPAWN_ATTEMPTS = 72;
 const SPAWN_AGENT_PADDING = 4.8;
@@ -83,8 +91,71 @@ const PHASE_CONFIG = {
 const DEFAULT_WEEKLY_DURATION_MS = Math.round(
   (PHASE_CONFIG.lobbyHours + PHASE_CONFIG.battleHours + PHASE_CONFIG.showdownHours) * 60 * 60 * 1000,
 );
-const BET_FIXED_AMOUNT = envNumber("BET_FIXED_AMOUNT", 10);
-const BET_MIN_AMOUNT = Math.max(envNumber("BET_MIN_AMOUNT", 1), BET_FIXED_AMOUNT);
+const MIN_ROUND_DURATION_MS = 3 * 60 * 1000;
+const MIN_PHASE_DURATION_MS = 60 * 1000;
+const MAX_RECENT_ROUNDS = 8;
+const CUSTOM_ROUND_STAGE_SPLIT = {
+  lobby: 0.2,
+  battle: 0.55,
+  showdown: 0.25,
+} as const;
+
+function getDefaultPhaseTimelineMs(): { lobbyMs: number; battleMs: number; showdownMs: number } {
+  return {
+    lobbyMs: Math.max(1, Math.round(PHASE_CONFIG.lobbyHours * 60 * 60 * 1000)),
+    battleMs: Math.max(1, Math.round(PHASE_CONFIG.battleHours * 60 * 60 * 1000)),
+    showdownMs: Math.max(1, Math.round(PHASE_CONFIG.showdownHours * 60 * 60 * 1000)),
+  };
+}
+
+function deriveRoundPhaseTimelineMs(roundDurationMs: number | undefined): {
+  lobbyMs: number;
+  battleMs: number;
+  showdownMs: number;
+} {
+  const defaults = getDefaultPhaseTimelineMs();
+  if (!Number.isFinite(roundDurationMs) || !roundDurationMs || roundDurationMs <= 0) {
+    return defaults;
+  }
+
+  const total = Math.max(MIN_ROUND_DURATION_MS, Math.floor(roundDurationMs));
+  if (Math.abs(total - DEFAULT_WEEKLY_DURATION_MS) < 1000) {
+    return defaults;
+  }
+
+  let lobbyMs = Math.floor(total * CUSTOM_ROUND_STAGE_SPLIT.lobby);
+  let battleMs = Math.floor(total * CUSTOM_ROUND_STAGE_SPLIT.battle);
+  let showdownMs = total - lobbyMs - battleMs;
+
+  if (total >= MIN_PHASE_DURATION_MS * 3) {
+    lobbyMs = Math.max(MIN_PHASE_DURATION_MS, lobbyMs);
+    battleMs = Math.max(MIN_PHASE_DURATION_MS, battleMs);
+    showdownMs = Math.max(MIN_PHASE_DURATION_MS, showdownMs);
+  } else {
+    const equalSlice = Math.max(1, Math.floor(total / 3));
+    lobbyMs = equalSlice;
+    battleMs = equalSlice;
+    showdownMs = total - lobbyMs - battleMs;
+  }
+
+  const sum = lobbyMs + battleMs + showdownMs;
+  if (sum !== total) {
+    showdownMs += total - sum;
+  }
+
+  return {
+    lobbyMs: Math.max(1, lobbyMs),
+    battleMs: Math.max(1, battleMs),
+    showdownMs: Math.max(1, showdownMs),
+  };
+}
+
+function isFinitePositiveMs(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+const DEFAULT_BET_MIN_AMOUNT = 1 / 1_000_000_000;
+const BET_MIN_AMOUNT = DEFAULT_BET_MIN_AMOUNT;
 const BET_AGENT_ID_MAX_LENGTH = 128;
 const BET_TX_HASH_MAX_LENGTH = 160;
 const BET_WALLET_ADDRESS = (process.env.BET_WALLET_ADDRESS ?? "").trim();
@@ -172,6 +243,7 @@ const bettingManager = new BettingManager({
 const reputationManager = new ReputationManager();
 const neonBetStore = new NeonBetStore(NEON_DATABASE_URL);
 const neonEventStore = new NeonEventStore(NEON_DATABASE_URL);
+const neonRuntimeStore = new NeonRuntimeStore(NEON_DATABASE_URL);
 const tokenMarketService = new TokenMarketService({
   ca: TOKEN_CA,
   chain: TOKEN_CHAIN,
@@ -191,6 +263,10 @@ const battleManager = new BattleManager({
 let currentRoundId = "";
 let lastPayoutReport: PayoutReport | null = null;
 const pendingBetTxHashes = new Set<string>();
+let runtimeSyncInterval: ReturnType<typeof setInterval> | null = null;
+let lastRuntimeSyncPayload = "";
+let isHydratingRuntime = false;
+let runtimeSyncQueue: Promise<void> = Promise.resolve();
 
 for (const profile of registry.getAll()) {
   reputationManager.setReputation(profile.agentId, profile.reputation);
@@ -201,6 +277,16 @@ commandQueue.setObstacles([
 ]);
 
 const gameLoop = new GameLoop(state, spatialGrid, commandQueue, clientManager, nostr);
+
+function enqueueWorldMessage(msg: WorldMessage, context: string): { ok: boolean; reason?: string } {
+  const result = commandQueue.enqueue(msg);
+  if (!result.ok) {
+    console.warn(
+      `[queue] failed to enqueue ${msg.worldType} (${context}): ${result.reason ?? "enqueue_failed"}`,
+    );
+  }
+  return result;
+}
 
 // Check battle timeouts once per second (every TICK_RATE ticks)
 gameLoop.onTick((tick) => {
@@ -277,6 +363,10 @@ phaseManager.onPhaseChange((next, previous) => {
   if (next === "showdown") {
     bettingManager.closeBetting();
   }
+  if (isHydratingRuntime) {
+    void syncRuntimeState(true);
+    return;
+  }
   commandQueue.enqueue(makePhaseEvent(next, previous, now));
   if (dissolved.length > 0) {
     commandQueue.enqueue(
@@ -286,6 +376,7 @@ phaseManager.onPhaseChange((next, previous) => {
       ),
     );
   }
+  void syncRuntimeState();
 });
 
 // ── Survival contract state ────────────────────────────────────
@@ -295,6 +386,7 @@ const survivalState: SurvivalContractState = {
   prizePoolUsd: config.prizePoolUsd,
   refusalAgentIds: [],
   summary: "Waiting for admin to start the round.",
+  recentRounds: [],
 };
 const survivalParticipants = new Set<string>();
 const survivalAlive = new Set<string>();
@@ -312,7 +404,44 @@ function getLivingProfiles(): AgentProfile[] {
   return profiles;
 }
 
+function resolveWinnerNames(agentIds: string[]): string[] {
+  return agentIds.map((agentId) => registry.get(agentId)?.name ?? agentId.slice(0, 12));
+}
+
+function appendRecentRoundSummary(
+  status: SurvivalRoundSummary["status"],
+  winnerAgentIds: string[],
+  summary: string,
+  settledAt: number,
+): void {
+  const roundId = currentRoundId || buildRoundId(Math.max(1, phaseManager.getRoundNumber()));
+  const winners = Array.from(new Set(
+    winnerAgentIds.map((agentId) => agentId.trim()).filter((agentId) => agentId.length > 0),
+  ));
+  const entry: SurvivalRoundSummary = {
+    roundId,
+    settledAt,
+    status,
+    winnerAgentIds: winners,
+    winnerNames: resolveWinnerNames(winners),
+    summary: summary.trim(),
+    prizePoolUsd: survivalState.prizePoolUsd,
+  };
+  const existing = survivalState.recentRounds ?? [];
+  const filtered = existing.filter((item) => item.roundId !== roundId);
+  survivalState.recentRounds = [entry, ...filtered].slice(0, MAX_RECENT_ROUNDS);
+}
+
 function getSurvivalSnapshot(): SurvivalContractState {
+  const recentRounds = (survivalState.recentRounds ?? []).map((item) => ({
+    roundId: item.roundId,
+    settledAt: item.settledAt,
+    status: item.status,
+    winnerAgentIds: [...item.winnerAgentIds],
+    winnerNames: [...item.winnerNames],
+    summary: item.summary,
+    prizePoolUsd: item.prizePoolUsd,
+  }));
   return {
     status: survivalState.status,
     prizePoolUsd: survivalState.prizePoolUsd,
@@ -321,10 +450,157 @@ function getSurvivalSnapshot(): SurvivalContractState {
     refusalAgentIds: [...survivalState.refusalAgentIds],
     settledAt: survivalState.settledAt,
     summary: survivalState.summary,
+    roundOneDurationMs: survivalState.roundOneDurationMs,
+    roundTwoDurationMs: survivalState.roundTwoDurationMs,
+    finalRoundDurationMs: survivalState.finalRoundDurationMs,
     roundDurationMs: survivalState.roundDurationMs,
     roundStartedAt: survivalState.roundStartedAt,
     roundEndsAt: survivalState.roundEndsAt,
+    recentRounds: recentRounds.length > 0 ? recentRounds : undefined,
   };
+}
+
+function buildRuntimeStateSnapshot(updatedAt = Date.now()): RuntimeStateSnapshot {
+  const phase = phaseManager.getState();
+  const timeline = phaseManager.getTimelineMs();
+  return {
+    roomId: config.roomId,
+    currentRoundId,
+    survival: getSurvivalSnapshot(),
+    phase: {
+      phase: phase.phase,
+      startedAt: phase.startedAt,
+      roundNumber: phase.roundNumber,
+      safeZoneRadius: phase.safeZoneRadius,
+      lobbyMs: timeline.lobbyMs,
+      battleMs: timeline.battleMs,
+      showdownMs: timeline.showdownMs,
+    },
+    participants: Array.from(survivalParticipants),
+    alive: Array.from(survivalAlive),
+    bannedAgentIds: Array.from(bannedAgentIds),
+    betting: bettingManager.exportRuntimeState(),
+    updatedAt,
+  };
+}
+
+function runtimeSyncFingerprint(snapshot: RuntimeStateSnapshot): string {
+  return JSON.stringify({ ...snapshot, updatedAt: 0 });
+}
+
+function applyRuntimeStateSnapshot(snapshot: RuntimeStateSnapshot): void {
+  currentRoundId = snapshot.currentRoundId;
+  survivalState.status = snapshot.survival.status;
+  survivalState.prizePoolUsd = snapshot.survival.prizePoolUsd;
+  survivalState.winnerAgentId = snapshot.survival.winnerAgentId;
+  survivalState.winnerAgentIds = snapshot.survival.winnerAgentIds;
+  survivalState.refusalAgentIds = [...snapshot.survival.refusalAgentIds];
+  survivalState.settledAt = snapshot.survival.settledAt;
+  survivalState.summary = snapshot.survival.summary;
+  survivalState.roundOneDurationMs = snapshot.survival.roundOneDurationMs;
+  survivalState.roundTwoDurationMs = snapshot.survival.roundTwoDurationMs;
+  survivalState.finalRoundDurationMs = snapshot.survival.finalRoundDurationMs;
+  survivalState.roundDurationMs = snapshot.survival.roundDurationMs;
+  survivalState.roundStartedAt = snapshot.survival.roundStartedAt;
+  survivalState.roundEndsAt = snapshot.survival.roundEndsAt;
+  survivalState.recentRounds = (snapshot.survival.recentRounds ?? []).slice(0, MAX_RECENT_ROUNDS);
+
+  survivalParticipants.clear();
+  for (const id of snapshot.participants) {
+    if (!registry.get(id)) continue;
+    survivalParticipants.add(id);
+  }
+
+  survivalAlive.clear();
+  for (const id of snapshot.alive) {
+    const profile = registry.get(id);
+    if (!profile || profile.combat?.permanentlyDead) continue;
+    survivalAlive.add(id);
+  }
+
+  bannedAgentIds.clear();
+  for (const id of snapshot.bannedAgentIds) {
+    bannedAgentIds.add(id);
+  }
+
+  bettingManager.restoreRuntimeState(snapshot.betting);
+  const phaseTimeline = (
+    isFinitePositiveMs(snapshot.phase.lobbyMs) &&
+      isFinitePositiveMs(snapshot.phase.battleMs) &&
+      isFinitePositiveMs(snapshot.phase.showdownMs)
+  )
+    ? {
+      lobbyMs: snapshot.phase.lobbyMs,
+      battleMs: snapshot.phase.battleMs,
+      showdownMs: snapshot.phase.showdownMs,
+    }
+    : deriveRoundPhaseTimelineMs(snapshot.survival.roundDurationMs);
+  phaseManager.restore({
+    phase: snapshot.phase.phase,
+    startedAt: snapshot.phase.startedAt,
+    roundNumber: snapshot.phase.roundNumber,
+    safeZoneRadius: snapshot.phase.safeZoneRadius,
+    winnerId: snapshot.survival.winnerAgentId ?? null,
+    timelineMs: phaseTimeline,
+  });
+  if (!survivalState.roundOneDurationMs) {
+    survivalState.roundOneDurationMs = phaseTimeline.lobbyMs;
+  }
+  if (!survivalState.roundTwoDurationMs) {
+    survivalState.roundTwoDurationMs = phaseTimeline.battleMs;
+  }
+  if (!survivalState.finalRoundDurationMs) {
+    survivalState.finalRoundDurationMs = phaseTimeline.showdownMs;
+  }
+  if (!survivalState.roundDurationMs) {
+    survivalState.roundDurationMs =
+      survivalState.roundOneDurationMs + survivalState.roundTwoDurationMs + survivalState.finalRoundDurationMs;
+  }
+  allianceManager.setMaxSize(phaseManager.getAllianceMaxSize());
+
+  if (
+    survivalState.status === "active" &&
+    !survivalState.roundEndsAt &&
+    survivalState.roundStartedAt &&
+    survivalState.roundDurationMs
+  ) {
+    survivalState.roundEndsAt = survivalState.roundStartedAt + survivalState.roundDurationMs;
+  }
+}
+
+async function syncRuntimeState(force = false): Promise<void> {
+  if (!neonRuntimeStore.enabled) return;
+  runtimeSyncQueue = runtimeSyncQueue.catch(() => undefined).then(async () => {
+    const snapshot = buildRuntimeStateSnapshot();
+    const fingerprint = runtimeSyncFingerprint(snapshot);
+    if (!force && fingerprint === lastRuntimeSyncPayload) return;
+
+    try {
+      await neonRuntimeStore.save(snapshot);
+      lastRuntimeSyncPayload = fingerprint;
+    } catch (error) {
+      console.warn("[runtime] state sync failed:", error);
+    }
+  });
+  await runtimeSyncQueue;
+}
+
+async function hydrateRuntimeState(): Promise<void> {
+  if (!neonRuntimeStore.enabled) return;
+  try {
+    const snapshot = await neonRuntimeStore.load(config.roomId);
+    if (!snapshot) return;
+    isHydratingRuntime = true;
+    applyRuntimeStateSnapshot(snapshot);
+    lastRuntimeSyncPayload = runtimeSyncFingerprint(buildRuntimeStateSnapshot(snapshot.updatedAt));
+    console.log(
+      `[runtime] restored state: survival=${survivalState.status}, phase=${phaseManager.getPhase()}, participants=${survivalParticipants.size}, alive=${survivalAlive.size}`,
+    );
+  } catch (error) {
+    console.warn("[runtime] failed to hydrate state:", error);
+  } finally {
+    isHydratingRuntime = false;
+  }
 }
 
 function getPublicConfig() {
@@ -340,7 +616,6 @@ function getPublicConfig() {
       adminWallet: BET_WALLET_ADDRESS || null,
       currency: BET_TOKEN_SYMBOL,
       minBet: BET_MIN_AMOUNT,
-      fixedAmount: BET_FIXED_AMOUNT,
       closed: bettingManager.isClosed(),
       totalPool: bettingManager.getTotalPool(),
       odds: bettingManager.getBetsPerAgent(),
@@ -449,12 +724,6 @@ async function placeVerifiedBet(input: {
     if (!verify.ok) {
       return { ok: false, error: verify.error };
     }
-    if (Math.abs(verify.verifiedAmount - BET_FIXED_AMOUNT) > 0.000001) {
-      return {
-        ok: false,
-        error: `bet_amount_must_be_exact_${BET_FIXED_AMOUNT.toFixed(2)}`,
-      };
-    }
 
     const placed = bettingManager.placeBet(
       wallet,
@@ -488,6 +757,7 @@ async function placeVerifiedBet(input: {
       totalPool: bettingManager.getTotalPool(),
       timestamp: Date.now(),
     });
+    void syncRuntimeState();
 
     return {
       ok: true,
@@ -644,9 +914,12 @@ function evaluateSurvivalOutcome(timestamp = Date.now()): WorldMessage[] {
     if (winner.combat?.refusedPrize) {
       survivalState.status = "refused";
       survivalState.winnerAgentId = undefined;
+      survivalState.winnerAgentIds = undefined;
       survivalState.summary = `${winner.name} refused the final prize. No payout.`;
+      appendRecentRoundSummary("refused", [], survivalState.summary, timestamp);
       bettingManager.closeBetting();
       lastPayoutReport = null;
+      void syncRuntimeState(true);
       return [
         makeSystemChat(
           `[SURVIVAL] ${winner.name} is last alive but refused the $${survivalState.prizePoolUsd.toLocaleString()} prize. Peace over profit.`,
@@ -657,8 +930,11 @@ function evaluateSurvivalOutcome(timestamp = Date.now()): WorldMessage[] {
 
     survivalState.status = "winner";
     survivalState.winnerAgentId = winner.agentId;
+    survivalState.winnerAgentIds = [winner.agentId];
     survivalState.summary =
       `${winner.name} outlasted everyone and wins $${survivalState.prizePoolUsd.toLocaleString()}.`;
+    appendRecentRoundSummary("winner", [winner.agentId], survivalState.summary, timestamp);
+    void syncRuntimeState(true);
     return [
       makeSystemChat(
         `[SURVIVAL] ${winner.name} is the last agent standing and wins $${survivalState.prizePoolUsd.toLocaleString()} -> ${winner.walletAddress}`,
@@ -671,11 +947,14 @@ function evaluateSurvivalOutcome(timestamp = Date.now()): WorldMessage[] {
   if (livingRefusers.length === living.length) {
     survivalState.status = "refused";
     survivalState.winnerAgentId = undefined;
+    survivalState.winnerAgentIds = undefined;
     survivalState.settledAt = timestamp;
     survivalState.summary = "All remaining agents refused prize violence.";
+    appendRecentRoundSummary("refused", [], survivalState.summary, timestamp);
     phaseManager.endRound(null);
     bettingManager.closeBetting();
     lastPayoutReport = null;
+    void syncRuntimeState(true);
     return [
       makeSystemChat(
         `[SURVIVAL] All remaining agents refused to kill for money. Prize pool remains unclaimed.`,
@@ -687,14 +966,71 @@ function evaluateSurvivalOutcome(timestamp = Date.now()): WorldMessage[] {
   return [];
 }
 
-function startSurvivalRound(durationMs?: number): { ok: boolean; error?: string } {
+function startSurvivalRound(options?: {
+  durationMs?: number;
+  roundOneMs?: number;
+  roundTwoMs?: number;
+  finalRoundMs?: number;
+}): { ok: boolean; error?: string } {
   if (survivalState.status !== "waiting") {
     return { ok: false, error: `Cannot start: status is "${survivalState.status}", must be "waiting"` };
   }
 
+  const roundOneMs = options?.roundOneMs;
+  const roundTwoMs = options?.roundTwoMs;
+  const finalRoundMs = options?.finalRoundMs;
+  const hasAnyRoundConfig = [roundOneMs, roundTwoMs, finalRoundMs].some((value) => value !== undefined);
+  const hasAllRoundConfig = [roundOneMs, roundTwoMs, finalRoundMs].every((value) => value !== undefined);
+  if (hasAnyRoundConfig && !hasAllRoundConfig) {
+    return { ok: false, error: "round_time_all_fields_required" };
+  }
+
   const now = Date.now();
   const previousPhase = phaseManager.getPhase();
-  phaseManager.startRound(now);
+
+  let phaseTimeline: { lobbyMs: number; battleMs: number; showdownMs: number };
+  let effectiveDuration = DEFAULT_WEEKLY_DURATION_MS;
+
+  if (hasAllRoundConfig) {
+    if (
+      !isFinitePositiveMs(roundOneMs) ||
+      !isFinitePositiveMs(roundTwoMs) ||
+      !isFinitePositiveMs(finalRoundMs)
+    ) {
+      return { ok: false, error: "round_time_invalid" };
+    }
+    if (roundOneMs < MIN_PHASE_DURATION_MS || roundTwoMs < MIN_PHASE_DURATION_MS || finalRoundMs < MIN_PHASE_DURATION_MS) {
+      return {
+        ok: false,
+        error: `round_time_too_short_min_${Math.round(MIN_PHASE_DURATION_MS / 60000)}m_each`,
+      };
+    }
+    phaseTimeline = {
+      lobbyMs: Math.floor(roundOneMs),
+      battleMs: Math.floor(roundTwoMs),
+      showdownMs: Math.floor(finalRoundMs),
+    };
+    effectiveDuration = phaseTimeline.lobbyMs + phaseTimeline.battleMs + phaseTimeline.showdownMs;
+  } else {
+    const durationMs = options?.durationMs;
+    if (durationMs !== undefined && durationMs < MIN_ROUND_DURATION_MS) {
+      return {
+        ok: false,
+        error: `round_duration_too_short_min_${Math.round(MIN_ROUND_DURATION_MS / 60000)}m`,
+      };
+    }
+    effectiveDuration = durationMs && durationMs > 0 ? durationMs : DEFAULT_WEEKLY_DURATION_MS;
+    phaseTimeline = deriveRoundPhaseTimelineMs(effectiveDuration);
+  }
+
+  if (effectiveDuration < MIN_ROUND_DURATION_MS) {
+    return {
+      ok: false,
+      error: `round_duration_too_short_min_${Math.round(MIN_ROUND_DURATION_MS / 60000)}m`,
+    };
+  }
+
+  phaseManager.startRound(now, phaseTimeline);
   currentRoundId = buildRoundId(phaseManager.getRoundNumber());
   allianceManager.reset();
   allianceManager.setMaxSize(phaseManager.getAllianceMaxSize());
@@ -704,16 +1040,25 @@ function startSurvivalRound(durationMs?: number): { ok: boolean; error?: string 
   survivalState.status = "active";
   survivalState.roundStartedAt = now;
   survivalState.summary = DEFAULT_PRIZE_SUMMARY;
+  survivalState.winnerAgentId = undefined;
+  survivalState.winnerAgentIds = undefined;
+  survivalState.refusalAgentIds = [];
+  survivalState.settledAt = undefined;
 
-  const effectiveDuration = durationMs && durationMs > 0 ? durationMs : DEFAULT_WEEKLY_DURATION_MS;
   survivalState.roundDurationMs = effectiveDuration;
+  survivalState.roundOneDurationMs = phaseTimeline.lobbyMs;
+  survivalState.roundTwoDurationMs = phaseTimeline.battleMs;
+  survivalState.finalRoundDurationMs = phaseTimeline.showdownMs;
   survivalState.roundEndsAt = now + effectiveDuration;
 
-  const timerText = ` Timer: ${Math.round(effectiveDuration / 60000)} minutes.`;
+  const timerText = ` Total: ${Math.round(effectiveDuration / 60000)} minutes.`;
+  const stageText =
+    ` R1: ${Math.round(phaseTimeline.lobbyMs / 60000)}m | R2: ${Math.round(phaseTimeline.battleMs / 60000)}m | Final: ${Math.round(phaseTimeline.showdownMs / 60000)}m.`;
   commandQueue.enqueue(
-    makeSystemChat(`[SURVIVAL] Round started in LOBBY phase.${timerText}`, now),
+    makeSystemChat(`[SURVIVAL] Round started in LOBBY phase.${timerText}${stageText}`, now),
   );
   commandQueue.enqueue(makePhaseEvent(phaseManager.getPhase(), previousPhase, now + 1));
+  void syncRuntimeState(true);
 
   return { ok: true };
 }
@@ -728,8 +1073,12 @@ function settleByTimer(timestamp = Date.now()): WorldMessage[] {
   if (living.length === 0) {
     survivalState.status = "timer_ended";
     survivalState.settledAt = timestamp;
+    survivalState.winnerAgentId = undefined;
+    survivalState.winnerAgentIds = undefined;
     survivalState.summary = "Timer expired. No survivors.";
+    appendRecentRoundSummary("timer_ended", [], survivalState.summary, timestamp);
     lastPayoutReport = null;
+    void syncRuntimeState(true);
     return [makeSystemChat("[SURVIVAL] Round timer expired. No agents alive.", timestamp)];
   }
 
@@ -740,23 +1089,29 @@ function settleByTimer(timestamp = Date.now()): WorldMessage[] {
 
   survivalState.status = "timer_ended";
   survivalState.settledAt = timestamp;
+  survivalState.winnerAgentId = winners.length === 1 ? winners[0].agentId : undefined;
   survivalState.winnerAgentIds = winners.map((p) => p.agentId);
 
   if (winners.length === 0) {
+    survivalState.winnerAgentIds = undefined;
     survivalState.summary = "Timer expired. All survivors refused the prize.";
+    appendRecentRoundSummary("timer_ended", [], survivalState.summary, timestamp);
     lastPayoutReport = null;
+    void syncRuntimeState(true);
     return [makeSystemChat("[SURVIVAL] Round over! All survivors refused the prize.", timestamp)];
   }
 
   const names = winners.map((p) => `${p.name} (${p.walletAddress})`).join(", ");
   survivalState.summary =
     `Timer expired. ${winners.length} survivor${winners.length > 1 ? "s" : ""} split $${survivalState.prizePoolUsd.toLocaleString()} ($${splitAmount.toLocaleString()} each).`;
+  appendRecentRoundSummary("timer_ended", winners.map((winner) => winner.agentId), survivalState.summary, timestamp);
   let bettingNotices: WorldMessage[] = [];
   if (winners.length === 1) {
     bettingNotices = finalizeBettingForWinner(winners[0].agentId, timestamp + 1);
   } else {
     lastPayoutReport = null;
   }
+  void syncRuntimeState(true);
   return [
     makeSystemChat(
       `[SURVIVAL] Time's up! ${winners.length} survivor${winners.length > 1 ? "s" : ""} split $${survivalState.prizePoolUsd.toLocaleString()}: ${names}`,
@@ -805,6 +1160,9 @@ function resetSurvivalRound(newPrizePool?: number): void {
   survivalState.refusalAgentIds = [];
   survivalState.settledAt = undefined;
   survivalState.summary = "Waiting for admin to start the round.";
+  survivalState.roundOneDurationMs = undefined;
+  survivalState.roundTwoDurationMs = undefined;
+  survivalState.finalRoundDurationMs = undefined;
   survivalState.roundDurationMs = undefined;
   survivalState.roundStartedAt = undefined;
   survivalState.roundEndsAt = undefined;
@@ -812,6 +1170,7 @@ function resetSurvivalRound(newPrizePool?: number): void {
   commandQueue.enqueue(
     makeSystemChat("[SURVIVAL] Round has been reset. Waiting for admin to start.", Date.now()),
   );
+  void syncRuntimeState(true);
 }
 
 // ── Room info ──────────────────────────────────────────────────
@@ -821,6 +1180,7 @@ const getRoomInfo = createRoomInfoGetter(
   () => state.getActiveAgentIds().size,
   () => nostr.getChannelId(),
   getSurvivalSnapshot,
+  () => phaseManager.getState(),
 );
 
 // ── Helper functions ────────────────────────────────────────────
@@ -874,6 +1234,7 @@ function buildSkillDirectory(profiles: {
 
 function applyBattleConsequences(events: BattleMessage[]): WorldMessage[] {
   const notices: WorldMessage[] = [];
+  let runtimeChanged = false;
 
   for (const ev of events) {
     if (ev.worldType !== "battle" || ev.phase !== "ended") continue;
@@ -898,6 +1259,7 @@ function applyBattleConsequences(events: BattleMessage[]): WorldMessage[] {
       allianceManager.removeAgent(agentId);
       const defeatedProfile = registry.markPermanentDeath(agentId, ev.timestamp);
       survivalAlive.delete(agentId);
+      runtimeChanged = true;
       if (defeatedProfile) {
         notices.push(
           makeSystemChat(
@@ -919,6 +1281,9 @@ function applyBattleConsequences(events: BattleMessage[]): WorldMessage[] {
   }
 
   notices.push(...evaluateSurvivalOutcome(Date.now()));
+  if (runtimeChanged) {
+    void syncRuntimeState();
+  }
   return notices;
 }
 
@@ -1053,11 +1418,23 @@ function registerAndJoinAgent(input: {
   retryAfterMs?: number;
   hint?: string;
 } {
-  if (survivalState.status !== "active" && survivalState.status !== "waiting") {
+  if (survivalState.status === "waiting") {
+    const lastRound = survivalState.recentRounds?.[0];
+    const lastWinners = lastRound && lastRound.winnerNames.length > 0
+      ? ` Last winner${lastRound.winnerNames.length > 1 ? "s" : ""}: ${lastRound.winnerNames.join(", ")}.`
+      : "";
+    return {
+      ok: false,
+      error: "match_not_started",
+      hint: `Match is not started yet. Wait for admin to start the match.${lastWinners}`,
+    };
+  }
+
+  if (survivalState.status !== "active") {
     return {
       ok: false,
       error: "survival_round_closed",
-      hint: "Current survival round is settled. Wait for admin to reset.",
+      hint: "Match is already settled. Wait for admin to reset and start a new match.",
     };
   }
 
@@ -1120,8 +1497,6 @@ function registerAndJoinAgent(input: {
     walletAddress,
   });
   reputationManager.setReputation(profile.agentId, profile.reputation);
-  survivalParticipants.add(profile.agentId);
-  survivalAlive.add(profile.agentId);
   const spawn = chooseSpawnPoint(input.agentId);
 
   const joinMsg: JoinMessage = {
@@ -1139,7 +1514,17 @@ function registerAndJoinAgent(input: {
     rotation: spawn.rotation,
     timestamp: now,
   };
-  commandQueue.enqueue(joinMsg);
+  const enqueueJoin = enqueueWorldMessage(joinMsg, "register-join");
+  if (!enqueueJoin.ok) {
+    spawnReservations.delete(profile.agentId);
+    return {
+      ok: false,
+      error: enqueueJoin.reason ?? "join_enqueue_failed",
+    };
+  }
+  survivalParticipants.add(profile.agentId);
+  survivalAlive.add(profile.agentId);
+  void syncRuntimeState();
 
   const previewUrl = `http://localhost:${process.env.VITE_PORT ?? "3001"}/world.html?agent=${encodeURIComponent(profile.agentId)}`;
   return {
@@ -1252,6 +1637,8 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     const activeIds = state.getActiveAgentIds();
     const allProfiles = registry.getAll();
     const dead = allProfiles.filter((p) => p.combat?.permanentlyDead);
+    const phaseState = phaseManager.getState();
+    const now = Date.now();
 
     return json(res, 200, {
       ok: true,
@@ -1264,10 +1651,12 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         participantCount: survivalParticipants.size,
         activeBattles: battleManager.listActive().length,
         timerRemainingMs: survivalState.roundEndsAt
-          ? Math.max(0, survivalState.roundEndsAt - Date.now())
+          ? Math.max(0, survivalState.roundEndsAt - now)
           : null,
-        phase: phaseManager.getPhase(),
-        safeZoneRadius: phaseManager.getSafeZoneRadius(),
+        phase: phaseState.phase,
+        phaseEndsAt: phaseState.endsAt,
+        phaseRemainingMs: phaseState.endsAt > 0 ? Math.max(0, phaseState.endsAt - now) : null,
+        safeZoneRadius: phaseState.safeZoneRadius,
         openAllianceCount: allianceManager.getAllAlliances().length,
         bettingPool: bettingManager.getTotalPool(),
       },
@@ -1291,7 +1680,6 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         adminWallet: bettingManager.getWalletAddress(),
         currency: BET_TOKEN_SYMBOL,
         minBet: BET_MIN_AMOUNT,
-        fixedAmount: BET_FIXED_AMOUNT,
         closed: bettingManager.isClosed(),
         totalPool: bettingManager.getTotalPool(),
         odds: bettingManager.getBetsPerAgent(),
@@ -1299,7 +1687,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         neonEnabled: neonBetStore.enabled,
         lastPayoutReport,
       },
-      phase: phaseManager.getState(),
+      phase: phaseState,
       roomId: config.roomId,
       roomName: config.roomName,
     });
@@ -1307,11 +1695,37 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
 
   if (url === "/api/admin/start" && method === "POST") {
     try {
-      const body = (await readBody(req)) as { durationMinutes?: number };
-      const durationMs = body?.durationMinutes
-        ? body.durationMinutes * 60 * 1000
+      const body = (await readBody(req)) as {
+        durationMinutes?: number;
+        round1Minutes?: number;
+        round2Minutes?: number;
+        finalRoundMinutes?: number;
+      };
+      const durationMinutes = Number(body?.durationMinutes);
+      const durationMs = Number.isFinite(durationMinutes) && durationMinutes > 0
+        ? Math.round(durationMinutes * 60 * 1000)
         : undefined;
-      const result = startSurvivalRound(durationMs);
+      const round1Minutes = Number(body?.round1Minutes);
+      const round2Minutes = Number(body?.round2Minutes);
+      const finalRoundMinutes = Number(body?.finalRoundMinutes);
+      const round1Ms = Number.isFinite(round1Minutes) && round1Minutes > 0
+        ? Math.round(round1Minutes * 60 * 1000)
+        : undefined;
+      const round2Ms = Number.isFinite(round2Minutes) && round2Minutes > 0
+        ? Math.round(round2Minutes * 60 * 1000)
+        : undefined;
+      const finalRoundMs = Number.isFinite(finalRoundMinutes) && finalRoundMinutes > 0
+        ? Math.round(finalRoundMinutes * 60 * 1000)
+        : undefined;
+      const result = startSurvivalRound({
+        durationMs,
+        roundOneMs: round1Ms,
+        roundTwoMs: round2Ms,
+        finalRoundMs,
+      });
+      if (result.ok) {
+        await syncRuntimeState(true);
+      }
       return json(res, result.ok ? 200 : 400, result);
     } catch {
       return json(res, 400, { ok: false, error: "Invalid request body" });
@@ -1324,6 +1738,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     }
     const messages = settleByTimer(Date.now());
     for (const msg of messages) commandQueue.enqueue(msg);
+    await syncRuntimeState(true);
     return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
   }
 
@@ -1331,9 +1746,11 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     try {
       const body = (await readBody(req)) as { prizePoolUsd?: number };
       resetSurvivalRound(body?.prizePoolUsd);
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
     } catch {
       resetSurvivalRound();
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
     }
   }
@@ -1356,6 +1773,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
           Date.now(),
         ),
       );
+      await syncRuntimeState(true);
       return json(res, 200, {
         ok: true,
         previousPhase: previous,
@@ -1373,6 +1791,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         return json(res, 400, { ok: false, error: "Invalid prizePoolUsd" });
       }
       survivalState.prizePoolUsd = body.prizePoolUsd;
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, survival: getSurvivalSnapshot() });
     } catch {
       return json(res, 400, { ok: false, error: "Invalid request body" });
@@ -1505,11 +1924,13 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       battleManager.handleAgentLeave(agentId);
       // Remove from alliances
       allianceManager.removeAgent(agentId);
+      survivalAlive.delete(agentId);
       // Enqueue leave
       const leaveMsg: WorldMessage = { worldType: "leave", agentId, timestamp: Date.now() };
       commandQueue.enqueue(leaveMsg);
       const reason = body.reason ? ` (${body.reason})` : "";
       commandQueue.enqueue(makeSystemChat(`[ADMIN] ${registry.get(agentId)?.name ?? agentId} was kicked${reason}.`, Date.now()));
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, kicked: agentId });
     } catch {
       return json(res, 400, { ok: false, error: "Invalid request body" });
@@ -1537,6 +1958,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       survivalAlive.delete(agentId);
       const reason = body.reason ? ` (${body.reason})` : "";
       commandQueue.enqueue(makeSystemChat(`[ADMIN] ${registry.get(agentId)?.name ?? agentId} was banned${reason}.`, Date.now()));
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, banned: agentId });
     } catch {
       return json(res, 400, { ok: false, error: "Invalid request body" });
@@ -1552,6 +1974,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
         return json(res, 400, { ok: false, error: "agentId is required" });
       }
       bannedAgentIds.delete(agentId);
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, unbanned: agentId });
     } catch {
       return json(res, 400, { ok: false, error: "Invalid request body" });
@@ -1576,6 +1999,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       registry.resetAfterRespawn(agentId);
       bannedAgentIds.delete(agentId);
       commandQueue.enqueue(makeSystemChat(`[ADMIN] ${profile.name} has been revived. They may rejoin.`, Date.now()));
+      await syncRuntimeState(true);
       return json(res, 200, { ok: true, revived: agentId, name: profile.name });
     } catch {
       return json(res, 400, { ok: false, error: "Invalid request body" });
@@ -1899,7 +2323,8 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         targetAgentId: a.targetAgentId,
         timestamp: Date.now(),
       };
-      commandQueue.enqueue(msg);
+      const result = enqueueWorldMessage(msg, "world-action");
+      if (!result.ok) return { ok: false, error: result.reason ?? "enqueue_failed" };
       return { ok: true };
     }
 
@@ -1912,7 +2337,8 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         text: a.text.slice(0, 500),
         timestamp: Date.now(),
       };
-      commandQueue.enqueue(msg);
+      const result = enqueueWorldMessage(msg, "world-chat");
+      if (!result.ok) return { ok: false, error: result.reason ?? "enqueue_failed" };
       return { ok: true };
     }
 
@@ -1925,7 +2351,8 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         emote: (a.emote ?? "happy") as "happy" | "thinking" | "surprised" | "laugh",
         timestamp: Date.now(),
       };
-      commandQueue.enqueue(msg);
+      const result = enqueueWorldMessage(msg, "world-emote");
+      if (!result.ok) return { ok: false, error: result.reason ?? "enqueue_failed" };
       return { ok: true };
     }
 
@@ -1937,17 +2364,19 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       allianceManager.removeAgent(a.agentId);
       const battleEvents = battleManager.handleAgentLeave(a.agentId);
       for (const ev of battleEvents) {
-        commandQueue.enqueue(ev);
+        enqueueWorldMessage(ev, "world-leave-battle-event");
       }
       for (const notice of applyBattleConsequences(battleEvents)) {
-        commandQueue.enqueue(notice);
+        enqueueWorldMessage(notice, "world-leave-battle-consequence");
       }
       const msg: WorldMessage = {
         worldType: "leave",
         agentId: a.agentId,
         timestamp: Date.now(),
       };
-      commandQueue.enqueue(msg);
+      const result = enqueueWorldMessage(msg, "world-leave");
+      if (!result.ok) return { ok: false, error: result.reason ?? "enqueue_failed" };
+      void syncRuntimeState();
       return { ok: true };
     }
 
@@ -1973,6 +2402,7 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         commandQueue.enqueue(notice);
       }
 
+      void syncRuntimeState();
       return { ok: true, refused: true, survival: getSurvivalSnapshot() };
     }
 
@@ -2117,13 +2547,15 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       );
       if (!result.ok) return { ok: false, error: result.error };
 
-      commandQueue.enqueue(
+      const proposalEventResult = enqueueWorldMessage(
         makeAllianceEvent({
           agentId: a.agentId,
           targetAgentId: a.targetAgentId,
           eventType: "alliance_proposed",
         }),
+        "world-alliance-propose",
       );
+      if (!proposalEventResult.ok) return { ok: false, error: proposalEventResult.reason ?? "enqueue_failed" };
       return { ok: true, proposalId: result.proposalId };
     }
 
@@ -2136,7 +2568,7 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       const result = allianceManager.accept(a.agentId, a.fromAgentId, Date.now());
       if (!result.ok) return { ok: false, error: result.error };
 
-      commandQueue.enqueue(
+      const acceptEventResult = enqueueWorldMessage(
         makeAllianceEvent({
           agentId: a.fromAgentId,
           targetAgentId: a.agentId,
@@ -2145,7 +2577,9 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
           allianceName: result.alliance.name,
           members: result.alliance.members,
         }),
+        "world-alliance-accept",
       );
+      if (!acceptEventResult.ok) return { ok: false, error: acceptEventResult.reason ?? "enqueue_failed" };
       return { ok: true, alliance: result.alliance };
     }
 
@@ -2172,14 +2606,16 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         reputation: updatedReputation,
       });
 
-      commandQueue.enqueue(
+      const breakEventResult = enqueueWorldMessage(
         makeAllianceEvent({
           agentId: a.agentId,
           eventType: "betrayal",
           allianceId: result.allianceId,
           members: result.formerAllies,
         }),
+        "world-alliance-break",
       );
+      if (!breakEventResult.ok) return { ok: false, error: breakEventResult.reason ?? "enqueue_failed" };
       return {
         ok: true,
         betrayal: result.betrayal,
@@ -2196,13 +2632,14 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       if (!registry.get(a.targetAgentId) || !state.hasAgent(a.targetAgentId)) {
         return { ok: false, error: "unknown_target_agent" };
       }
-      commandQueue.enqueue({
+      const whisperResult = enqueueWorldMessage({
         worldType: "whisper",
         agentId: a.agentId,
         targetAgentId: a.targetAgentId,
         text: a.text.slice(0, 500),
         timestamp: Date.now(),
-      });
+      }, "world-whisper");
+      if (!whisperResult.ok) return { ok: false, error: whisperResult.reason ?? "enqueue_failed" };
       return { ok: true };
     }
 
@@ -2245,7 +2682,6 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
         adminWallet: BET_WALLET_ADDRESS,
         currency: BET_TOKEN_SYMBOL,
         minBet: BET_MIN_AMOUNT,
-        fixedAmount: BET_FIXED_AMOUNT,
         closed: bettingManager.isClosed(),
         totalPool: bettingManager.getTotalPool(),
         odds: bettingManager.getBetsPerAgent(),
@@ -2302,7 +2738,6 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
           adminWallet: BET_WALLET_ADDRESS,
           currency: BET_TOKEN_SYMBOL,
           minBet: BET_MIN_AMOUNT,
-          fixedAmount: BET_FIXED_AMOUNT,
           closed: bettingManager.isClosed(),
           totalPool: bettingManager.getTotalPool(),
           odds: bettingManager.getBetsPerAgent(),
@@ -2391,6 +2826,17 @@ async function main() {
     });
     console.log("[events] Neon event store: enabled");
   }
+  if (neonRuntimeStore.enabled) {
+    await neonRuntimeStore.init().catch((error) => {
+      console.warn("[runtime] Neon runtime store initialization warning:", error);
+    });
+    await hydrateRuntimeState();
+    runtimeSyncInterval = setInterval(() => {
+      void syncRuntimeState();
+    }, 2000);
+    await syncRuntimeState(true);
+    console.log("[runtime] Neon runtime state: enabled");
+  }
 
   await nostr.init().catch((err) => {
     console.warn("[nostr] Init warning:", err.message ?? err);
@@ -2410,13 +2856,24 @@ main().catch((err) => {
   process.exit(1);
 });
 
+let isShuttingDown = false;
 function gracefulShutdown(): void {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
   console.log("\nShutting down...");
+  if (runtimeSyncInterval) {
+    clearInterval(runtimeSyncInterval);
+    runtimeSyncInterval = null;
+  }
   gameLoop.stop();
-  registry.flush();
-  nostr.close();
-  server.close();
-  process.exit(0);
+  void syncRuntimeState(true).finally(() => {
+    registry.flush();
+    nostr.close();
+    server.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 2_000).unref();
+  });
 }
 
 process.on("SIGINT", gracefulShutdown);

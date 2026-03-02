@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocket } from "ws";
 import { GameLoop } from "../game-loop.js";
 import type { ClientManager } from "../client-manager.js";
 import type { CommandQueue } from "../command-queue.js";
@@ -105,5 +106,19 @@ describe("GameLoop hardening", () => {
     expect(worldState.apply).toHaveBeenCalledTimes(2);
     expect(nostr.publish).toHaveBeenCalledTimes(1);
     expect(seenEventLengths).toEqual([1]);
+  });
+
+  it("builds one snapshot per tick even with many clients requesting a snapshot", () => {
+    const { loop, worldState, clientManager } = createLoop([]);
+    const clients = Array.from({ length: 25 }, () => ({
+      ws: { readyState: WebSocket.OPEN, send: vi.fn() },
+      viewX: 0,
+      viewZ: 0,
+      lastAckTick: 0,
+    }));
+    (clientManager.getAllClients as unknown as ReturnType<typeof vi.fn>).mockReturnValue(clients);
+
+    runPrivateTick(loop);
+    expect(worldState.snapshot).toHaveBeenCalledTimes(1);
   });
 });
