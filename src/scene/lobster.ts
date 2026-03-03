@@ -1,555 +1,275 @@
 import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
+
+// ── Paths ────────────────────────────────────────────────────────────
+const MODEL_PATH = "/Models/lobsterDownloaded.gltf";
+const TEXTURE_PATH = "/Models/LobsterTexture.png";
+
+// ── Public types ─────────────────────────────────────────────────────
+
+export interface LobsterInstance {
+  group: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: Map<string, THREE.AnimationAction>;
+  materials: THREE.Material[];
+}
+
+// ── Action-to-clip mapping ───────────────────────────────────────────
+
+export const ACTION_TO_CLIP: Record<string, string> = {
+  // Social / emote actions
+  idle: "Idle_A",
+  walk: "Walk",
+  talk: "Clicked",
+  pinch: "Attack",
+  wave: "Bounce",
+  dance: "Bounce",
+  backflip: "Jump",
+  spin: "Spin",
+  eat: "Eat",
+  sit: "Sit",
+  swim: "Swim",
+  fly: "Fly",
+  roll: "Roll",
+  lay: "Lay",
+
+  // Combat intents
+  strike: "Attack",
+  guard: "Sit",
+  feint: "Fear",
+  approach: "Run",
+  retreat: "Fear",
+  stunned: "Hit",
+  victory: "Bounce",
+  defeated: "Death",
+  combatReady: "Idle_B",
+};
+
+export const IDLE_VARIANTS: string[] = ["Idle_A", "Idle_B", "Idle_C"];
+
+/** Pick a random idle clip name. */
+export function randomIdleClip(): string {
+  return IDLE_VARIANTS[Math.floor(Math.random() * IDLE_VARIANTS.length)];
+}
+
+// ── One-shot clips (play once and hold final frame) ──────────────────
+
+const ONE_SHOT_CLIPS = new Set<string>([
+  "Attack",
+  "Jump",
+  "Death",
+  "Hit",
+  "Clicked",
+  "Sit",
+  "Lay",
+]);
+
+// ── Cached model data (loaded once, shared across instances) ─────────
+
+let cachedScene: THREE.Group | null = null;
+let cachedClips: THREE.AnimationClip[] = [];
+let cachedBaseTexture: HTMLImageElement | null = null;
+const hueTextureCache = new Map<number, THREE.CanvasTexture>();
+
+// ── Model loader ─────────────────────────────────────────────────────
 
 /**
- * Creates a procedural lobster mesh group.
- * Body = ellipsoid, tail = tapered segments, claws, legs, eye stalks.
- * Uses MeshToonMaterial for a stylised underwater look.
+ * Load the GLTF lobster model and its base texture once.
+ * Subsequent calls return immediately from cache.
  */
-export function createLobster(color: string): THREE.Group {
-  const group = new THREE.Group();
-  group.name = "lobster";
+export async function loadLobsterModel(): Promise<void> {
+  if (cachedScene) return;
 
-  const baseColor = new THREE.Color(color);
-  const darkColor = baseColor.clone().multiplyScalar(0.6);
+  const loader = new GLTFLoader();
+  const textureLoader = new THREE.TextureLoader();
 
-  const bodyMat = new THREE.MeshToonMaterial({ color: baseColor });
-  const darkMat = new THREE.MeshToonMaterial({ color: darkColor });
-  const eyeMat = new THREE.MeshToonMaterial({ color: 0x111111 });
-  const eyeWhiteMat = new THREE.MeshToonMaterial({ color: 0xeeeeee });
+  const [gltf, baseTexture] = await Promise.all([
+    loader.loadAsync(MODEL_PATH),
+    new Promise<HTMLImageElement>((resolve, reject) => {
+      const tex = textureLoader.load(
+        TEXTURE_PATH,
+        (t) => resolve(t.image as HTMLImageElement),
+        undefined,
+        reject,
+      );
+      // We need the image element for canvas hue-shift; the texture object
+      // itself is disposed — each instance gets its own CanvasTexture.
+      tex.dispose();
+    }),
+  ]);
 
-  // ── Body (main carapace) ───────────────────────────────────
-  const body = new THREE.Mesh(
-    new THREE.SphereGeometry(0.6, 12, 8),
-    bodyMat
+  cachedScene = gltf.scene;
+  cachedClips = gltf.animations;
+  cachedBaseTexture = baseTexture;
+
+  console.log(
+    `[lobster] Model loaded — ${cachedClips.length} clips, ` +
+      `${cachedScene.children.length} root children`,
   );
-  body.scale.set(1, 0.7, 1.6);
-  body.position.set(0, 0.5, 0);
-  body.castShadow = true;
-  group.add(body);
+}
 
-  // ── Head ───────────────────────────────────────────────────
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.4, 10, 8),
-    bodyMat
-  );
-  head.scale.set(1, 0.8, 1.1);
-  head.position.set(0, 0.55, 0.85);
-  head.castShadow = true;
-  group.add(head);
+// ── Hue-shift texture ────────────────────────────────────────────────
 
-  // ── Tail segments ──────────────────────────────────────────
-  const tailSegments = 5;
-  for (let i = 0; i < tailSegments; i++) {
-    const t = i / tailSegments;
-    const radius = 0.45 * (1 - t * 0.5);
-    const seg = new THREE.Mesh(
-      new THREE.SphereGeometry(radius, 8, 6),
-      i % 2 === 0 ? bodyMat : darkMat
-    );
-    seg.scale.set(1, 0.6, 0.9);
-    seg.position.set(0, 0.35 - i * 0.05, -0.8 - i * 0.38);
-    seg.castShadow = true;
-    group.add(seg);
-  }
-
-  // Tail fan
-  const fan = new THREE.Mesh(
-    new THREE.SphereGeometry(0.35, 8, 6),
-    darkMat
-  );
-  fan.scale.set(1.6, 0.2, 1);
-  fan.position.set(0, 0.2, -2.7);
-  fan.castShadow = true;
-  group.add(fan);
-
-  // ── Claws ──────────────────────────────────────────────────
-  for (const side of [-1, 1]) {
-    const clawGroup = new THREE.Group();
-    clawGroup.name = side === -1 ? "claw_left" : "claw_right";
-
-    // Arm
-    const arm = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.08, 0.1, 0.8, 6),
-      bodyMat
-    );
-    arm.rotation.z = side * 0.5;
-    arm.rotation.x = -0.3;
-    arm.position.set(side * 0.4, 0, 0.3);
-    arm.castShadow = true;
-    clawGroup.add(arm);
-
-    // Forearm
-    const forearm = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.07, 0.09, 0.6, 6),
-      bodyMat
-    );
-    forearm.position.set(side * 0.8, 0.1, 0.6);
-    forearm.rotation.z = side * 0.8;
-    forearm.castShadow = true;
-    clawGroup.add(forearm);
-
-    // Pincer (two halves)
-    for (const half of [-1, 1]) {
-      const pincer = new THREE.Mesh(
-        new THREE.SphereGeometry(0.14, 8, 6),
-        darkMat
-      );
-      pincer.scale.set(0.6, 0.4, 1.5);
-      pincer.position.set(
-        side * 1.1,
-        0.1 + half * 0.06,
-        0.85
-      );
-      pincer.castShadow = true;
-      clawGroup.add(pincer);
-    }
-
-    clawGroup.position.set(0, 0.5, 0.3);
-    group.add(clawGroup);
-  }
-
-  // ── Legs (4 pairs) ─────────────────────────────────────────
-  for (let i = 0; i < 4; i++) {
-    for (const side of [-1, 1]) {
-      const leg = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.03, 0.04, 0.5, 4),
-        darkMat
-      );
-      leg.position.set(
-        side * (0.45 + i * 0.02),
-        0.15,
-        0.3 - i * 0.3
-      );
-      leg.rotation.z = side * 0.8;
-      leg.rotation.x = -0.1 + i * 0.05;
-      leg.castShadow = true;
-      leg.name = `leg_${side === -1 ? "l" : "r"}_${i}`;
-      group.add(leg);
-    }
-  }
-
-  // ── Eye stalks ─────────────────────────────────────────────
-  for (const side of [-1, 1]) {
-    const stalk = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.03, 0.04, 0.3, 6),
-      bodyMat
-    );
-    stalk.position.set(side * 0.18, 0.85, 1.05);
-    stalk.rotation.z = side * 0.3;
-    stalk.rotation.x = -0.2;
-    group.add(stalk);
-
-    const eyeWhite = new THREE.Mesh(
-      new THREE.SphereGeometry(0.06, 8, 6),
-      eyeWhiteMat
-    );
-    eyeWhite.position.set(side * 0.25, 0.97, 1.08);
-    group.add(eyeWhite);
-
-    const eye = new THREE.Mesh(
-      new THREE.SphereGeometry(0.04, 8, 6),
-      eyeMat
-    );
-    eye.position.set(side * 0.27, 0.97, 1.12);
-    group.add(eye);
-  }
-
-  // ── Antennae ───────────────────────────────────────────────
-  for (const side of [-1, 1]) {
-    const points: THREE.Vector3[] = [];
-    for (let t = 0; t <= 1; t += 0.1) {
-      points.push(
-        new THREE.Vector3(
-          side * (0.1 + t * 0.4),
-          0.8 + t * 0.3 - t * t * 0.4,
-          1.1 + t * 0.8
-        )
-      );
-    }
-    const curve = new THREE.CatmullRomCurve3(points);
-    const tubeGeo = new THREE.TubeGeometry(curve, 10, 0.015, 4, false);
-    const antenna = new THREE.Mesh(tubeGeo, darkMat);
-    group.add(antenna);
-  }
-
-  // Scale the whole lobster
-  group.scale.set(1.2, 1.2, 1.2);
-
-  return group;
+/**
+ * Convert a CSS colour string to a hue angle (0-360).
+ * Falls back to 0 (red) on parse failure.
+ */
+function colorToHue(color: string): number {
+  const c = new THREE.Color(color);
+  const hsl = { h: 0, s: 0, l: 0 };
+  c.getHSL(hsl);
+  return Math.round(hsl.h * 360);
 }
 
 /**
- * All animations use absolute `=` assignments (never `+=` or `*=`)
- * to avoid unbounded accumulation across frames. The lobster-manager
- * calls position.set() before animations, so position.y offsets here
- * are additive on top of the correct base position for one frame only.
+ * Create a canvas copy of the base texture with a CSS hue-rotate filter
+ * applied. The result is cached by hue angle so duplicate colours reuse
+ * the same GPU texture.
  */
+function getHueShiftedTexture(hueAngle: number): THREE.CanvasTexture {
+  const cached = hueTextureCache.get(hueAngle);
+  if (cached) return cached;
 
-/** Animate idle bob — note: position.y is reset by manager each frame */
-export function animateIdle(group: THREE.Group, time: number): void {
-  group.position.y += Math.sin(time * 2) * 0.003;
-  group.rotation.z = Math.sin(time * 1.5) * 0.02;
-}
-
-/** Animate walking (wiggle legs) */
-export function animateWalk(group: THREE.Group, time: number): void {
-  group.children.forEach((child) => {
-    if (child.name.startsWith("leg_")) {
-      const idx = parseInt(child.name.split("_")[2], 10);
-      const phase = idx * Math.PI * 0.5;
-      child.rotation.x = Math.sin(time * 8 + phase) * 0.4;
-    }
-  });
-}
-
-/** Animate claw snap (talk / pinch) */
-export function animateClawSnap(group: THREE.Group, time: number): void {
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  const snap = Math.sin(time * 6) * 0.15;
-  if (leftClaw) leftClaw.rotation.x = snap;
-  if (rightClaw) rightClaw.rotation.x = -snap;
-}
-
-/** Animate wave (raise one claw) */
-export function animateWave(group: THREE.Group, time: number): void {
-  const rightClaw = group.getObjectByName("claw_right");
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.5 + Math.sin(time * 4) * 0.5;
-    rightClaw.rotation.x = -0.3;
-  }
-}
-
-/** Animate dance (rhythmic body bounce + alternating claw raises + leg shuffle) */
-export function animateDance(group: THREE.Group, time: number): void {
-  // Rhythmic vertical bounce (additive on manager-set base)
-  group.position.y += Math.abs(Math.sin(time * 5)) * 0.15;
-
-  // Body sway side to side
-  group.rotation.z = Math.sin(time * 3) * 0.15;
-
-  // Alternating claw raises
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.3 + Math.sin(time * 5) * 0.6;
-    leftClaw.rotation.x = Math.sin(time * 3) * 0.3;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.3 + Math.sin(time * 5 + Math.PI) * 0.6;
-    rightClaw.rotation.x = Math.sin(time * 3 + Math.PI) * 0.3;
+  if (!cachedBaseTexture) {
+    throw new Error("[lobster] Base texture not loaded — call loadLobsterModel() first");
   }
 
-  // Leg shuffle — use absolute assignments based on base rotation
-  group.children.forEach((child) => {
-    if (child.name.startsWith("leg_")) {
-      const idx = parseInt(child.name.split("_")[2], 10);
-      const side = child.name.includes("_l_") ? -1 : 1;
-      const baseZ = side * 0.8; // original rotation from construction
-      const phase = idx * Math.PI * 0.5;
-      child.rotation.x = Math.sin(time * 10 + phase) * 0.5;
-      child.rotation.z = baseZ + Math.sin(time * 5 + phase) * 0.1;
-    }
-  });
+  const img = cachedBaseTexture;
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth || img.width;
+  canvas.height = img.naturalHeight || img.height;
+
+  const ctx = canvas.getContext("2d")!;
+  ctx.filter = `hue-rotate(${hueAngle}deg)`;
+  ctx.drawImage(img, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.flipY = false; // GLTF convention
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+
+  hueTextureCache.set(hueAngle, tex);
+  return tex;
 }
+
+// ── Instance creator ─────────────────────────────────────────────────
 
 /**
- * Animate backflip (full rotation around X axis over ~1.5 sec cycle).
- * Uses a smooth ease curve so the flip accelerates/decelerates naturally.
+ * Clone the cached GLTF model, apply a per-agent hue-shifted texture,
+ * wire up an AnimationMixer with all clips, and return a LobsterInstance.
+ *
+ * Requires `loadLobsterModel()` to have completed first.
  */
-export function animateBackflip(group: THREE.Group, time: number): void {
-  const cycleDuration = 1.5;
-  const phase = (time % cycleDuration) / cycleDuration;
+export function createLobsterInstance(color: string): LobsterInstance {
+  if (!cachedScene) {
+    throw new Error("[lobster] Model not loaded — call loadLobsterModel() first");
+  }
 
-  // Smooth ease-in-out for the flip rotation
-  const eased = phase < 0.5
-    ? 2 * phase * phase
-    : 1 - Math.pow(-2 * phase + 2, 2) / 2;
+  // Clone with skeleton awareness so bone bindings remain correct
+  const cloned = SkeletonUtils.clone(cachedScene) as THREE.Group;
+  cloned.name = "lobster";
+  cloned.scale.setScalar(1.8);
 
-  group.rotation.x = eased * Math.PI * 2;
+  // Hue-shifted texture for this agent
+  const hue = colorToHue(color);
+  const tex = getHueShiftedTexture(hue);
 
-  // Jump arc (additive on manager-set base)
-  group.position.y += Math.sin(phase * Math.PI) * 2.5;
+  // Collect all materials (we clone them so emissive hit-flash is independent)
+  const materials: THREE.Material[] = [];
 
-  // Tuck legs during flip
-  group.children.forEach((child) => {
-    if (child.name.startsWith("leg_")) {
-      child.rotation.x = -0.5 * Math.sin(phase * Math.PI);
+  cloned.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.castShadow = true;
+
+    // Clone material per instance
+    if (Array.isArray(child.material)) {
+      child.material = child.material.map((m: THREE.Material) => {
+        const clonedMat = m.clone();
+        if (clonedMat instanceof THREE.MeshStandardMaterial) {
+          clonedMat.map = tex;
+          clonedMat.emissiveMap = tex;
+          clonedMat.needsUpdate = true;
+        }
+        materials.push(clonedMat);
+        return clonedMat;
+      });
+    } else {
+      const clonedMat = child.material.clone();
+      if (clonedMat instanceof THREE.MeshStandardMaterial) {
+        clonedMat.map = tex;
+        clonedMat.emissiveMap = tex;
+        clonedMat.needsUpdate = true;
+      }
+      materials.push(clonedMat);
+      child.material = clonedMat;
     }
   });
 
-  // Pull claws in during flip
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  const tuck = Math.sin(phase * Math.PI) * 0.4;
-  if (leftClaw) leftClaw.rotation.x = -tuck;
-  if (rightClaw) rightClaw.rotation.x = -tuck;
-}
+  // AnimationMixer + pre-create all actions
+  const mixer = new THREE.AnimationMixer(cloned);
+  const actions = new Map<string, THREE.AnimationAction>();
 
-/** Animate spin (360° Y rotation with rising motion) — all absolute values */
-export function animateSpin(group: THREE.Group, time: number): void {
-  const spinSpeed = 2 * Math.PI; // one full rotation per second
+  for (const clip of cachedClips) {
+    const action = mixer.clipAction(clip);
 
-  // Deterministic spin based on time (no accumulation)
-  group.rotation.y = (time * spinSpeed) % (Math.PI * 2);
-
-  // Slight bounce (additive on manager-set base)
-  const cycleDuration = 1.0;
-  const phase = (time % cycleDuration) / cycleDuration;
-  group.position.y += Math.sin(phase * Math.PI) * 0.5;
-
-  // Spread claws outward during spin (centrifugal effect)
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.6;
-    leftClaw.rotation.x = Math.sin(time * 8) * 0.2;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.6;
-    rightClaw.rotation.x = Math.sin(time * 8 + Math.PI) * 0.2;
-  }
-
-  // Fan legs out with capped spread (absolute, not multiplicative)
-  group.children.forEach((child) => {
-    if (child.name.startsWith("leg_")) {
-      const side = child.name.includes("_l_") ? -1 : 1;
-      const baseZ = side * 0.8;
-      const spread = Math.sin(time * 3) * 0.15;
-      child.rotation.z = baseZ + spread;
+    if (ONE_SHOT_CLIPS.has(clip.name)) {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    } else {
+      action.setLoop(THREE.LoopRepeat, Infinity);
     }
-  });
+
+    actions.set(clip.name, action);
+  }
+
+  // Start with Idle_A playing
+  const idleAction = actions.get("Idle_A");
+  if (idleAction) {
+    idleAction.play();
+  }
+
+  return { group: cloned, mixer, actions, materials };
 }
 
-/** Restore limb/claw pose so switching animations does not accumulate offsets. */
-export function resetLobsterPose(group: THREE.Group): void {
-  group.rotation.x = 0;
-  group.rotation.z = 0;
+// ── Crossfade helper ─────────────────────────────────────────────────
 
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.x = 0;
-    leftClaw.rotation.z = 0;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.x = 0;
-    rightClaw.rotation.z = 0;
-  }
+/**
+ * Smoothly crossfade from the currently playing action to `clipName`.
+ * If `clipName` is already the active clip, this is a no-op.
+ *
+ * @param instance  The lobster instance to animate
+ * @param clipName  Target GLTF animation clip name (e.g. "Walk", "Attack")
+ * @param duration  Crossfade duration in seconds (default 0.2)
+ */
+export function crossfadeTo(
+  instance: LobsterInstance,
+  clipName: string,
+  duration = 0.2,
+): void {
+  const target = instance.actions.get(clipName);
+  if (!target) return;
 
-  group.children.forEach((child) => {
-    if (!child.name.startsWith("leg_")) return;
-    const idx = parseInt(child.name.split("_")[2], 10);
-    const side = child.name.includes("_l_") ? -1 : 1;
-    const baseZ = side * 0.8;
-    const baseX = -0.1 + idx * 0.05;
-    child.rotation.x = baseX;
-    child.rotation.z = baseZ;
-  });
-}
-
-/** Aggressive forward claw combo used for strike intent. */
-export function animateStrike(group: THREE.Group, time: number): void {
-  const phase = Math.sin(time * 16) * 0.5 + 0.5;
-  const lunge = phase * 0.45;
-  group.rotation.x = -0.12 - lunge * 0.25;
-  group.position.y += 0.05 + Math.sin(time * 20) * 0.01;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.32 + lunge * 0.35;
-    leftClaw.rotation.x = -0.5 + lunge * 1.2;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.32 - lunge * 0.35;
-    rightClaw.rotation.x = -0.5 + lunge * 1.2;
+  // Find the currently playing action
+  let current: THREE.AnimationAction | null = null;
+  for (const action of instance.actions.values()) {
+    if (action.isRunning() && action !== target) {
+      current = action;
+      break;
+    }
   }
 
-  group.children.forEach((child) => {
-    if (!child.name.startsWith("leg_")) return;
-    const idx = parseInt(child.name.split("_")[2], 10);
-    const side = child.name.includes("_l_") ? -1 : 1;
-    const phaseOffset = idx * 0.8;
-    const baseZ = side * 0.8;
-    child.rotation.x = -0.25 + Math.sin(time * 14 + phaseOffset) * 0.2;
-    child.rotation.z = baseZ + Math.sin(time * 10 + phaseOffset) * 0.06;
-  });
-}
+  // Already playing the target clip
+  if (target.isRunning()) return;
 
-/** Fake-out shoulder roll with asymmetric claw rhythm. */
-export function animateFeint(group: THREE.Group, time: number): void {
-  group.rotation.z = Math.sin(time * 14) * 0.17;
-  group.rotation.x = -0.04;
-  group.position.y += 0.02;
+  // Reset the target in case it was a completed one-shot
+  target.reset();
+  target.setEffectiveTimeScale(1);
+  target.setEffectiveWeight(1);
 
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  const fakeA = Math.sin(time * 18) * 0.45;
-  const fakeB = Math.sin(time * 18 + Math.PI * 0.6) * 0.45;
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.35 + fakeA * 0.4;
-    leftClaw.rotation.x = -0.15 + fakeA * 0.7;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.35 - fakeB * 0.4;
-    rightClaw.rotation.x = -0.15 + fakeB * 0.7;
-  }
-}
-
-/** Defensive crouch with crossed claws and tight leg stance. */
-export function animateGuard(group: THREE.Group, time: number): void {
-  group.rotation.x = -0.1;
-  group.position.y -= 0.03;
-  group.rotation.z = Math.sin(time * 6) * 0.04;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.95;
-    leftClaw.rotation.x = 0.32;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.95;
-    rightClaw.rotation.x = 0.32;
+  if (current) {
+    current.crossFadeTo(target, duration, true);
   }
 
-  group.children.forEach((child) => {
-    if (!child.name.startsWith("leg_")) return;
-    const idx = parseInt(child.name.split("_")[2], 10);
-    const side = child.name.includes("_l_") ? -1 : 1;
-    const baseZ = side * 0.8;
-    child.rotation.x = -0.24 + idx * 0.03;
-    child.rotation.z = baseZ;
-  });
-}
-
-/** Ready stance while actively in combat between turns. */
-export function animateCombatReady(group: THREE.Group, time: number): void {
-  group.rotation.x = -0.06;
-  group.rotation.z = Math.sin(time * 5) * 0.04;
-  group.position.y += Math.sin(time * 7) * 0.01;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  const clawPulse = Math.sin(time * 10) * 0.08;
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.42 + clawPulse;
-    leftClaw.rotation.x = -0.18 + Math.sin(time * 8) * 0.12;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.42 - clawPulse;
-    rightClaw.rotation.x = -0.18 + Math.sin(time * 8 + Math.PI) * 0.12;
-  }
-
-  group.children.forEach((child) => {
-    if (!child.name.startsWith("leg_")) return;
-    const idx = parseInt(child.name.split("_")[2], 10);
-    const side = child.name.includes("_l_") ? -1 : 1;
-    const phase = idx * 0.65;
-    const baseZ = side * 0.8;
-    child.rotation.x = -0.16 + Math.sin(time * 9 + phase) * 0.18;
-    child.rotation.z = baseZ + Math.sin(time * 6 + phase) * 0.04;
-  });
-}
-
-/** Low stalking advance used for approach intent. */
-export function animateApproach(group: THREE.Group, time: number): void {
-  group.rotation.x = -0.08;
-  group.position.y += Math.sin(time * 8) * 0.012;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.2 + Math.sin(time * 8) * 0.08;
-    leftClaw.rotation.x = -0.22;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.2 - Math.sin(time * 8 + Math.PI) * 0.08;
-    rightClaw.rotation.x = -0.22;
-  }
-
-  group.children.forEach((child) => {
-    if (!child.name.startsWith("leg_")) return;
-    const idx = parseInt(child.name.split("_")[2], 10);
-    const phase = idx * 0.9;
-    child.rotation.x = Math.sin(time * 10 + phase) * 0.34;
-  });
-}
-
-/** Backward tail-kick posture for retreat intent. */
-export function animateRetreat(group: THREE.Group, time: number): void {
-  group.rotation.x = 0.1;
-  group.position.y += Math.sin(time * 13) * 0.016;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 0.14;
-    leftClaw.rotation.x = -0.5;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -0.14;
-    rightClaw.rotation.x = -0.5;
-  }
-
-  group.children.forEach((child) => {
-    if (!child.name.startsWith("leg_")) return;
-    const idx = parseInt(child.name.split("_")[2], 10);
-    const phase = idx * 0.8;
-    child.rotation.x = -0.22 + Math.sin(time * 12 + phase) * 0.22;
-  });
-}
-
-/** Short wobble when the lobster is hit. */
-export function animateStunned(group: THREE.Group, time: number): void {
-  group.rotation.z = Math.sin(time * 24) * 0.22;
-  group.rotation.x = -0.05 + Math.sin(time * 18) * 0.06;
-  group.position.y += Math.sin(time * 16) * 0.016;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.x = -0.35;
-    leftClaw.rotation.z = 0.22;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.x = -0.35;
-    rightClaw.rotation.z = -0.22;
-  }
-}
-
-/** Winner celebration with raised claws and bounce. */
-export function animateVictory(group: THREE.Group, time: number): void {
-  group.position.y += 0.08 + Math.abs(Math.sin(time * 6)) * 0.1;
-  group.rotation.z = Math.sin(time * 5) * 0.12;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.z = 1.05 + Math.sin(time * 8) * 0.18;
-    leftClaw.rotation.x = -0.18;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.z = -1.05 + Math.sin(time * 8 + Math.PI) * 0.18;
-    rightClaw.rotation.x = -0.18;
-  }
-}
-
-/** Fallen posture for permanently eliminated agents. */
-export function animateDefeated(group: THREE.Group, time: number): void {
-  group.rotation.x = Math.PI * 0.5;
-  group.rotation.z = Math.sin(time * 2.5) * 0.02;
-  group.position.y = 0.04;
-
-  const leftClaw = group.getObjectByName("claw_left");
-  const rightClaw = group.getObjectByName("claw_right");
-  if (leftClaw) {
-    leftClaw.rotation.x = -0.6;
-    leftClaw.rotation.z = 0.25;
-  }
-  if (rightClaw) {
-    rightClaw.rotation.x = -0.6;
-    rightClaw.rotation.z = -0.25;
-  }
+  target.play();
 }

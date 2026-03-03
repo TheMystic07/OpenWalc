@@ -33,7 +33,7 @@ import type {
   PhaseMessage,
   AllianceMessage,
 } from "./types.js";
-import { WORLD_SIZE, BATTLE_RANGE, CHAT_RANGE } from "./types.js";
+import { WORLD_SIZE, BATTLE_RANGE, CHAT_RANGE, type ActionMessage } from "./types.js";
 
 try {
   process.loadEnvFile();
@@ -2246,7 +2246,7 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
           commands: {
             move:      '{"command":"world-move","args":{"agentId":"ID","x":0,"y":0,"z":0,"rotation":0}}',
             chat:      '{"command":"world-chat","args":{"agentId":"ID","text":"hello"}}',
-            action:    '{"command":"world-action","args":{"agentId":"ID","action":"wave"}}  — wave|dance|idle|pinch|talk|backflip|spin',
+            action:    '{"command":"world-action","args":{"agentId":"ID","action":"wave"}}  — wave|dance|idle|pinch|talk|backflip|spin|eat|sit|swim|fly|roll|lay',
             emote:     '{"command":"world-emote","args":{"agentId":"ID","emote":"happy"}}  — happy|thinking|surprised|laugh',
             state:     '{"command":"world-state"}',
             battle:    '{"command":"world-battle-start","args":{"agentId":"ID","targetAgentId":"OTHER"}}  — must be within 12 units',
@@ -2261,7 +2261,7 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
             refuse:    '{"command":"survival-refuse","args":{"agentId":"ID"}}  — opt out of prize violence',
             leave:     '{"command":"world-leave","args":{"agentId":"ID"}}',
           },
-          actions: ["walk","idle","wave","pinch","talk","dance","backflip","spin"],
+          actions: ["walk","idle","wave","pinch","talk","dance","backflip","spin","eat","sit","swim","fly","roll","lay"],
           intents: ["approach","strike","guard","feint","retreat"],
           worldBounds: "x and z in [-150, 150], y=0",
           turnTimeout: "30s — missing intent auto-guards",
@@ -2319,7 +2319,7 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
       const msg: WorldMessage = {
         worldType: "action",
         agentId: a.agentId,
-        action: (a.action ?? "idle") as "walk" | "idle" | "wave" | "pinch" | "talk" | "dance" | "backflip" | "spin",
+        action: (a.action ?? "idle") as ActionMessage["action"],
         targetAgentId: a.targetAgentId,
         timestamp: Date.now(),
       };

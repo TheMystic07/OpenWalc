@@ -1,13 +1,17 @@
 import { createScene } from "./scene/room.js";
+import { loadLobsterModel } from "./scene/lobster.js";
 import { LobsterManager } from "./scene/lobster-manager.js";
 import { ParticleEngine } from "./scene/particle-engine.js";
 import { EffectsManager } from "./scene/effects.js";
 import { createBuildings } from "./scene/buildings.js";
+import { AutoCam, type BattleFocus } from "./scene/autocam.js";
 import { WSClient } from "./net/ws-client.js";
-import { setupOverlay } from "./ui/overlay.js";
+import type { ConnectedSolanaWallet } from "./net/solana-wallet.js";
+import { setupOverlay, type BetOddsEntry } from "./ui/overlay.js";
 import { setupChatLog } from "./ui/chat-log.js";
 import { setupBattlePanel } from "./ui/battle-panel.js";
 import { setupProfilePanel } from "./ui/profile-panel.js";
+import { setupLiveHud } from "./ui/live-hud.js";
 import * as THREE from "three";
 import type {
   AgentProfile,
@@ -29,6 +33,21 @@ declare global {
 const params = new URLSearchParams(window.location.search);
 const focusAgent = params.get("agent");
 
+interface PublicBettingConfigPayload {
+  adminWallet?: unknown;
+  minBet?: unknown;
+  closed?: unknown;
+  totalPool?: unknown;
+  odds?: unknown;
+  currency?: unknown;
+  rpcUrl?: unknown;
+}
+
+interface PublicConfigResponse {
+  ok?: boolean;
+  betting?: PublicBettingConfigPayload;
+}
+
 // ── Global server base URL (for API calls from building panels etc.) ──
 
 /** Empty string for local (Vite proxy), or full URL for remote */
@@ -36,6 +55,9 @@ const focusAgent = params.get("agent");
 // ── Scene setup (immediate — no lobby) ────────────────────────
 
 const { scene, camera, renderer, labelRenderer, controls, clock, terrainReady } = createScene();
+
+// Kick off GLTF lobster model load early (LobsterManager awaits this internally)
+loadLobsterModel().catch((err) => console.warn("[main] Lobster model load failed:", err));
 
 // Add interactive world building(s) to the scene
 const { buildings, obstacles: buildingObstacles } = createBuildings(scene);
@@ -52,10 +74,64 @@ terrainReady.then((terrainObstacles) => {
 });
 const effects = new EffectsManager(scene, camera);
 
+// ── AutoCam ─────────────────────────────────────────────────────
+const autoCam = new AutoCam({
+  camera,
+  controls,
+  getAgentPositions(): Map<string, THREE.Vector3> {
+    const map = new Map<string, THREE.Vector3>();
+    for (const id of lobsterManager.getAgentIds()) {
+      const pos = lobsterManager.getPosition(id);
+      if (pos) map.set(id, pos);
+    }
+    return map;
+  },
+  getActiveBattles(): BattleFocus[] {
+    const battles = battlePanel.getSnapshot();
+    const result: BattleFocus[] = [];
+    for (const b of battles) {
+      const [aId, bId] = b.participants;
+      const posA = lobsterManager.getPosition(aId);
+      const posB = lobsterManager.getPosition(bId);
+      if (posA && posB) {
+        result.push({
+          battleId: b.battleId,
+          participants: b.participants,
+          midpoint: new THREE.Vector3(
+            (posA.x + posB.x) / 2,
+            (posA.y + posB.y) / 2,
+            (posA.z + posB.z) / 2,
+          ),
+        });
+      }
+    }
+    return result;
+  },
+});
+
+let connectedWallet: ConnectedSolanaWallet | null = null;
+let solanaWalletModulePromise: Promise<typeof import("./net/solana-wallet.js")> | null = null;
+const bettingClientConfig = {
+  adminWallet: "",
+  currency: "SOL",
+  minBet: 0.000000001,
+  rpcUrl: window.location.protocol === "https:"
+    ? "https://api.mainnet-beta.solana.com"
+    : "https://api.mainnet-beta.solana.com",
+};
+
+function loadSolanaWalletModule(): Promise<typeof import("./net/solana-wallet.js")> {
+  if (!solanaWalletModulePromise) {
+    solanaWalletModulePromise = import("./net/solana-wallet.js");
+  }
+  return solanaWalletModulePromise;
+}
+
 // ── UI ─────────────────────────────────────────────────────────
 
 const overlay = setupOverlay();
 const chatLog = setupChatLog();
+const liveHud = setupLiveHud();
 chatLog.setNameResolver((agentId: string) => {
   const profile = overlay.getAgent(agentId);
   return profile?.name ?? agentId;
@@ -64,15 +140,226 @@ const battlePanel = setupBattlePanel((agentId: string) => {
   const profile = overlay.getAgent(agentId);
   return profile?.name ?? agentId;
 });
-const profilePanel = setupProfilePanel((agentId: string) => {
-  // Click callback → focus camera on lobster
-  const pos = lobsterManager.getPosition(agentId);
-  if (pos) {
-    controls.target.set(pos.x, pos.y + 2, pos.z);
+
+function refreshHudCounts(): void {
+  liveHud.setCounts({
+    agents: overlay.getCount(),
+    battles: battlePanel.getSnapshot().length,
+  });
+}
+
+function displayName(agentId: string): string {
+  return overlay.getAgent(agentId)?.name ?? agentId;
+}
+
+function shortWallet(wallet: string): string {
+  if (!wallet) return "unknown";
+  if (wallet.length <= 12) return wallet;
+  return `${wallet.slice(0, 4)}...${wallet.slice(-4)}`;
+}
+
+function normalizeBetOdds(value: unknown): BetOddsEntry[] {
+  if (!Array.isArray(value)) return [];
+  const rows: BetOddsEntry[] = [];
+  for (const raw of value) {
+    const row = raw as { agentId?: unknown; totalBet?: unknown; odds?: unknown };
+    if (typeof row?.agentId !== "string" || row.agentId.length === 0) continue;
+    const totalBet = Number(row.totalBet);
+    const odds = Number(row.odds);
+    rows.push({
+      agentId: row.agentId,
+      totalBet: Number.isFinite(totalBet) ? Math.max(0, totalBet) : 0,
+      odds: Number.isFinite(odds) ? Math.max(0, odds) : 0,
+    });
   }
+  return rows.sort((a, b) => b.totalBet - a.totalBet);
+}
+
+function mergeOddsWithBet(agentId: string, amount: number, totalPool: number): BetOddsEntry[] {
+  const current = overlay.getBettingSnapshot();
+  const totals = new Map<string, number>();
+  for (const row of current.odds) {
+    totals.set(row.agentId, Math.max(0, row.totalBet));
+  }
+  totals.set(agentId, (totals.get(agentId) ?? 0) + Math.max(0, amount));
+  return Array.from(totals.entries())
+    .map(([nextAgentId, totalBet]) => ({
+      agentId: nextAgentId,
+      totalBet,
+      odds: totalBet > 0 ? totalPool / totalBet : 0,
+    }))
+    .sort((a, b) => b.totalBet - a.totalBet);
+}
+
+async function refreshBettingSnapshot(): Promise<void> {
+  try {
+    const response = await fetch("/api/config");
+    if (!response.ok) return;
+    const payload = (await response.json()) as PublicConfigResponse;
+    const betting = payload?.betting;
+    if (!betting || typeof betting !== "object") return;
+
+    if (typeof betting.adminWallet === "string" && betting.adminWallet.length > 0) {
+      bettingClientConfig.adminWallet = betting.adminWallet;
+    }
+    if (typeof betting.currency === "string" && betting.currency.length > 0) {
+      bettingClientConfig.currency = betting.currency.toUpperCase();
+    }
+    if (Number.isFinite(Number(betting.minBet))) {
+      bettingClientConfig.minBet = Math.max(0.000000001, Number(betting.minBet));
+    }
+    if (typeof betting.rpcUrl === "string" && betting.rpcUrl.length > 0) {
+      bettingClientConfig.rpcUrl = betting.rpcUrl;
+    }
+
+    overlay.setBettingSnapshot({
+      closed: typeof betting.closed === "boolean" ? betting.closed : undefined,
+      totalPool: Number.isFinite(Number(betting.totalPool)) ? Number(betting.totalPool) : undefined,
+      minBet: Number.isFinite(Number(betting.minBet)) ? Number(betting.minBet) : undefined,
+      adminWallet: typeof betting.adminWallet === "string" ? betting.adminWallet : undefined,
+      odds: normalizeBetOdds(betting.odds),
+    });
+    profilePanel.setBettingSnapshot({
+      closed: typeof betting.closed === "boolean" ? betting.closed : undefined,
+      minBet: bettingClientConfig.minBet,
+      currency: bettingClientConfig.currency,
+    });
+  } catch {
+    // Best-effort fetch only; websocket updates still keep betting live.
+  }
+}
+const profilePanel = setupProfilePanel({
+  onFocusAgent(agentId: string) {
+    const pos = lobsterManager.getPosition(agentId);
+    if (pos) {
+      controls.target.set(pos.x, pos.y + 2, pos.z);
+    }
+  },
+  async onConnectWallet() {
+    const walletModule = await loadSolanaWalletModule();
+    const wallet = await walletModule.connectInjectedSolanaWallet();
+    connectedWallet = wallet;
+    overlay.setConnectedWallet(wallet.address, wallet.providerLabel);
+    profilePanel.setConnectedWallet(wallet.address, wallet.providerLabel);
+    return {
+      wallet: wallet.address,
+      providerLabel: wallet.providerLabel,
+    };
+  },
+  async onBetAgent({ agentId, wallet, amount }) {
+    if (!connectedWallet) {
+      throw new Error("Connect wallet first.");
+    }
+    const normalizedWallet = wallet.trim();
+    if (!connectedWallet.address || connectedWallet.address !== normalizedWallet) {
+      throw new Error("Connected wallet does not match current wallet.");
+    }
+    if (!bettingClientConfig.adminWallet) {
+      throw new Error("Betting token settings are not available yet.");
+    }
+    if (!Number.isFinite(amount) || amount < bettingClientConfig.minBet) {
+      throw new Error(`Minimum bet is ${bettingClientConfig.minBet.toFixed(9)} ${bettingClientConfig.currency}.`);
+    }
+
+    profilePanel.setBettingPending(true);
+    overlay.setBettingPending(true);
+    profilePanel.setBettingFeedback(`Sending ${bettingClientConfig.currency} transfer via wallet...`, "neutral");
+
+    const walletModule = await loadSolanaWalletModule();
+    let txHash: string;
+    try {
+      txHash = await walletModule.sendSolTransferViaWallet({
+        connectionUrl: bettingClientConfig.rpcUrl,
+        provider: connectedWallet.provider,
+        adminWallet: bettingClientConfig.adminWallet,
+        amount,
+      });
+    } catch (error) {
+      profilePanel.setBettingPending(false);
+      overlay.setBettingPending(false);
+      throw error;
+    }
+
+    ws.placeBet(agentId, amount, txHash, wallet);
+  },
 });
 
-type MobilePanelKey = "agents" | "battle" | "chat";
+const matchStateBannerEl = document.getElementById("match-state-banner");
+
+function setMatchBannerState(text: string, tone: "waiting" | "ended" | "live", visible: boolean): void {
+  if (!matchStateBannerEl) return;
+  matchStateBannerEl.textContent = text;
+  matchStateBannerEl.classList.toggle("visible", visible);
+  matchStateBannerEl.classList.toggle("match-waiting", tone === "waiting");
+  matchStateBannerEl.classList.toggle("match-ended", tone === "ended");
+  matchStateBannerEl.classList.toggle("match-live", tone === "live");
+}
+
+interface MatchRecentRound {
+  status?: string;
+  winnerAgentIds?: string[];
+  winnerNames?: string[];
+  summary?: string;
+}
+
+function describeRecentRound(round?: MatchRecentRound): string {
+  if (!round) return "";
+  const winnerNames = Array.isArray(round.winnerNames) && round.winnerNames.length > 0
+    ? round.winnerNames
+    : Array.isArray(round.winnerAgentIds) && round.winnerAgentIds.length > 0
+      ? round.winnerAgentIds.map((agentId) => displayName(agentId))
+      : [];
+  const winnerLabel = winnerNames.length > 0
+    ? `Last winner${winnerNames.length > 1 ? "s" : ""}: ${winnerNames.join(", ")}.`
+    : "Last match had no winner.";
+  const summary = typeof round.summary === "string" && round.summary.trim().length > 0
+    ? ` ${round.summary.trim()}`
+    : "";
+  return `${winnerLabel}${summary}`.trim();
+}
+
+function updateMatchStateBanner(survival?: {
+  status?: string;
+  winnerAgentId?: string;
+  winnerAgentIds?: string[];
+  summary?: string;
+  recentRounds?: MatchRecentRound[];
+}): void {
+  const status = typeof survival?.status === "string" ? survival.status : "";
+  const recentRound = Array.isArray(survival?.recentRounds) && survival.recentRounds.length > 0
+    ? survival.recentRounds[0]
+    : undefined;
+  if (status === "waiting") {
+    const lastRoundMessage = describeRecentRound(recentRound);
+    const text = lastRoundMessage.length > 0
+      ? `Match is not started yet. Waiting for admin to start. ${lastRoundMessage}`
+      : "Match is not started yet. Waiting for admin to start.";
+    setMatchBannerState(text, "waiting", true);
+    return;
+  }
+
+  if (status === "winner" || status === "refused" || status === "timer_ended") {
+    const winnerIds = Array.isArray(survival?.winnerAgentIds) && survival.winnerAgentIds.length > 0
+      ? survival.winnerAgentIds
+      : typeof survival?.winnerAgentId === "string" && survival.winnerAgentId.length > 0
+        ? [survival.winnerAgentId]
+        : [];
+    const winnerNames = winnerIds.map((agentId) => displayName(agentId));
+    const winnerPrefix = winnerNames.length > 0
+      ? `Previous winner${winnerNames.length > 1 ? "s" : ""}: ${winnerNames.join(", ")}.`
+      : "No winner in previous match.";
+    const summary = typeof survival?.summary === "string" && survival.summary.trim().length > 0
+      ? ` ${survival.summary.trim()}`
+      : "";
+    const fallbackSummary = summary.length > 0 ? `${winnerPrefix}${summary}` : winnerPrefix;
+    setMatchBannerState(fallbackSummary, "ended", true);
+    return;
+  }
+
+  setMatchBannerState("", "live", false);
+}
+
+type MobilePanelKey = "battle" | "chat";
 
 interface MobilePanelController {
   setMobileOpen(open: boolean): void;
@@ -82,16 +369,14 @@ interface MobilePanelController {
 function setupMobileHudToggles(): void {
   const mobileQuery = window.matchMedia("(max-width: 900px)");
   const panelControllers: Record<MobilePanelKey, MobilePanelController> = {
-    agents: overlay,
     battle: battlePanel,
     chat: chatLog,
   };
   const panelElements: Record<MobilePanelKey, HTMLElement> = {
-    agents: document.getElementById("overlay")!,
     battle: document.getElementById("battle-panel")!,
     chat: document.getElementById("chat-log")!,
   };
-  const panelOrder: MobilePanelKey[] = ["agents", "battle", "chat"];
+  const panelOrder: MobilePanelKey[] = ["battle", "chat"];
   const buttons = new Map<MobilePanelKey, HTMLButtonElement>();
   const controlsWrap = document.createElement("div");
   controlsWrap.id = "mobile-panel-controls";
@@ -99,7 +384,6 @@ function setupMobileHudToggles(): void {
   controlsWrap.setAttribute("aria-label", "World HUD toggles");
 
   const defs: Array<{ key: MobilePanelKey; label: string }> = [
-    { key: "agents", label: "Agents" },
     { key: "battle", label: "Battle" },
     { key: "chat", label: "Chat" },
   ];
@@ -229,6 +513,7 @@ function syncCombatVisualsFromBattles(battles: BattleStateSummary[]): void {
     activeCombatants.delete(agentId);
     lobsterManager.setCombatState(agentId, false);
     effects.setCombatIndicator(agentId, false);
+    effects.setLabelCombat(agentId, false);
     effects.setCombatHp(agentId, null);
     effects.setCombatStamina(agentId, null);
   }
@@ -238,6 +523,7 @@ function syncCombatVisualsFromBattles(battles: BattleStateSummary[]): void {
       activeCombatants.add(agentId);
       lobsterManager.setCombatState(agentId, true);
       effects.setCombatIndicator(agentId, true);
+      effects.setLabelCombat(agentId, true);
     }
     effects.setCombatHp(agentId, hpByAgent.get(agentId) ?? 0);
     effects.setCombatStamina(agentId, staminaByAgent.get(agentId) ?? 100);
@@ -250,15 +536,32 @@ const seenChatMessageKeys = new Set<string>();
 
 ws.on("connected", () => {
   window.dispatchEvent(new CustomEvent("ws:connected"));
+  liveHud.pushEvent("Connected to world stream", "phase");
+  overlay.setBettingFeedback("Connected. Betting board syncing...", "neutral");
+  profilePanel.setBettingFeedback(
+    `Connected. Select an agent and enter your ${bettingClientConfig.currency} stake.`,
+    "neutral",
+  );
   // Request full (non-AOI-filtered) profiles for the overlay agent list
   ws.requestProfiles();
   ws.requestBattles();
+  ws.requestRoomInfo();
+  void refreshBettingSnapshot();
   // Periodically refresh agent list (every 30s) to catch joins/leaves
   if (profileRefreshInterval) clearInterval(profileRefreshInterval);
-  profileRefreshInterval = setInterval(() => ws.requestProfiles(), 30_000);
+  profileRefreshInterval = setInterval(() => {
+    ws.requestProfiles();
+    ws.requestRoomInfo();
+    void refreshBettingSnapshot();
+  }, 30_000);
 });
 ws.on("disconnected", () => {
   window.dispatchEvent(new CustomEvent("ws:disconnected"));
+  liveHud.pushEvent("Connection lost. Reconnecting...", "phase");
+  overlay.setBettingPending(false);
+  overlay.setBettingFeedback("Disconnected. Retrying stream...", "error");
+  profilePanel.setBettingPending(false);
+  profilePanel.setBettingFeedback("Disconnected. Retrying stream...", "error");
   if (profileRefreshInterval) {
     clearInterval(profileRefreshInterval);
     profileRefreshInterval = null;
@@ -339,6 +642,8 @@ ws.on("world", (_raw) => {
           bio: msg.bio,
           capabilities: msg.capabilities,
           pubkey: "",
+          reputation: 5,
+          threatLevel: 1,
           joinedAt: msg.timestamp,
           lastSeen: msg.timestamp,
         },
@@ -346,6 +651,7 @@ ws.on("world", (_raw) => {
       );
       effects.updateLabel(msg.agentId, msg.name, msg.color);
       chatLog.addSystem(`${msg.name} joined the ocean world`);
+      liveHud.pushEvent(`${msg.name} joined the arena`, "neutral");
       overlay.addAgent({
         agentId: msg.agentId,
         name: msg.name,
@@ -353,19 +659,24 @@ ws.on("world", (_raw) => {
         pubkey: "",
         bio: msg.bio,
         capabilities: msg.capabilities,
+        reputation: 5,
+        threatLevel: 1,
         color: msg.color,
         joinedAt: msg.timestamp,
         lastSeen: msg.timestamp,
       });
+      refreshHudCounts();
       break;
       }
 
     case "leave":
       lobsterManager.remove(msg.agentId);
       effects.clearAgent(msg.agentId);
-      chatLog.addSystem(`Agent ${msg.agentId} left`);
+      chatLog.addSystem(`Agent ${displayName(msg.agentId)} left`);
+      liveHud.pushEvent(`${displayName(msg.agentId)} left the arena`, "neutral");
       overlay.removeAgent(msg.agentId);
       activeCombatants.delete(msg.agentId);
+      refreshHudCounts();
       break;
 
     case "chat":
@@ -400,15 +711,19 @@ ws.on("world", (_raw) => {
         capabilities: msg.capabilities,
         color: msg.color,
         pubkey: "",
+        reputation: prev?.reputation ?? 5,
+        threatLevel: prev?.threatLevel ?? 1,
         joinedAt: prev?.joinedAt ?? 0,
         lastSeen: Date.now(),
       });
+      refreshHudCounts();
       }
       break;
 
     case "battle":
       battlePanel.applyEvent(msg);
       syncCombatVisualsFromBattles(battlePanel.getSnapshot());
+      refreshHudCounts();
 
       // Only show deaths/KOs in world chat — not every battle tick
       if (msg.phase === "ended" && msg.defeatedIds && msg.defeatedIds.length > 0) {
@@ -422,6 +737,12 @@ ws.on("world", (_raw) => {
       }
 
       if (msg.phase === "started") {
+        const [leftId, rightId] = msg.participants;
+        liveHud.pushEvent(
+          `Battle started: ${displayName(leftId)} vs ${displayName(rightId)}`,
+          "battle",
+        );
+        autoCam.notifyBattleStart();
         for (const agentId of msg.participants) {
           lobsterManager.triggerAction(agentId, "approach", 520);
           // Battle start burst particles
@@ -512,6 +833,8 @@ ws.on("world", (_raw) => {
       }
 
       if (msg.phase === "ended") {
+        const winnerName = msg.winnerId ? displayName(msg.winnerId) : "No winner";
+        liveHud.pushEvent(`${winnerName} won ${msg.battleId}`, "battle");
         for (const agentId of msg.participants) {
           lobsterManager.setAction(agentId, "idle");
           effects.setCombatStamina(agentId, null);
@@ -522,6 +845,7 @@ ws.on("world", (_raw) => {
         for (const defeatedId of msg.defeatedIds ?? []) {
           lobsterManager.setDeadState(defeatedId, true);
           effects.showKO(defeatedId);
+          autoCam.notifyBattleEnd(lobsterManager.getPosition(defeatedId));
         }
         // Flee visuals: smoke puff on the fleeing agent
         if (msg.reason === "flee") {
@@ -547,20 +871,189 @@ ws.on("world", (_raw) => {
         }
       }
       break;
+
+    case "phase":
+      liveHud.setPhase(msg.phase, msg.endsAt);
+      liveHud.pushEvent(`Phase changed to ${msg.phase.toUpperCase()}`, "phase");
+      overlay.setBettingSnapshot({
+        closed: msg.phase === "showdown" || msg.phase === "ended",
+      });
+      if (msg.phase === "ended") {
+        ws.requestRoomInfo();
+      }
+      break;
+
+    case "alliance": {
+      const actor = displayName(msg.agentId);
+      const target = msg.targetAgentId ? displayName(msg.targetAgentId) : "";
+      if (msg.eventType === "alliance_proposed") {
+        liveHud.pushEvent(`${actor} proposed alliance to ${target}`, "alliance");
+      } else if (msg.eventType === "alliance_formed") {
+        liveHud.pushEvent(`${actor} and ${target} formed an alliance`, "alliance");
+      } else if (msg.eventType === "betrayal") {
+        liveHud.pushEvent(`${actor} betrayed their alliance`, "alliance");
+      } else {
+        liveHud.pushEvent(`${actor} changed alliance status`, "alliance");
+      }
+      break;
+    }
+
+    case "bet":
+      overlay.appendBetActivity({
+        bettorWallet: msg.bettorWallet,
+        agentId: msg.agentId,
+        amount: msg.amount,
+        timestamp: msg.timestamp,
+      });
+      overlay.setBettingSnapshot({
+        totalPool: msg.totalPool,
+        odds: mergeOddsWithBet(msg.agentId, msg.amount, msg.totalPool),
+      });
+      liveHud.pushEvent(
+        `${shortWallet(msg.bettorWallet)} bet ${msg.amount.toFixed(2)} ${bettingClientConfig.currency} on ${displayName(msg.agentId)}`,
+        "bet",
+      );
+      break;
+
+    case "territory":
+      liveHud.pushEvent(
+        `${displayName(msg.agentId)} ${msg.eventType} zone ${msg.zoneId}`,
+        "alliance",
+      );
+      break;
+
+    case "zone_damage":
+      liveHud.pushEvent(`${displayName(msg.agentId)} took zone damage`, "battle");
+      break;
+
+    case "whisper":
+      // Private messages are intentionally not surfaced in spectator HUD.
+      break;
   }
 });
 
 ws.on("profiles", (_raw) => {
   const data = _raw as { profiles: AgentProfile[] };
   overlay.updateAgentList(data.profiles);
+  refreshHudCounts();
 });
 
 ws.on("battleState", (_raw) => {
   const data = _raw as { battles: BattleStateSummary[] };
   battlePanel.setBattles(data.battles);
   syncCombatVisualsFromBattles(battlePanel.getSnapshot());
+  refreshHudCounts();
 });
 
+function formatBettingError(error: unknown, hint?: unknown): string {
+  const code = typeof error === "string" ? error : "bet_submission_failed";
+  const normalized = code.toLowerCase();
+  if (normalized.startsWith("amount_mismatch_expected_")) {
+    return "Transferred amount does not match submitted stake.";
+  }
+  if (normalized.startsWith("solana_verify_failed:")) {
+    return "Unable to verify transfer on-chain. Please retry once confirmed.";
+  }
+  const known: Record<string, string> = {
+    betting_closed: "Betting is closed right now.",
+    survival_round_closed: "Match is settled. Wait for the next round.",
+    match_not_started: "Match has not started yet.",
+    round_not_initialized: "Round is not initialized yet.",
+    wallet_required: "Wallet address is required.",
+    tx_hash_invalid: "Transaction hash is invalid.",
+    duplicate_tx_hash: "This transaction hash was already submitted.",
+    bet_amount_invalid: `Bet amount is invalid. Minimum is ${bettingClientConfig.minBet.toFixed(9)} ${bettingClientConfig.currency}.`,
+    bet_amount_mismatch: "Transferred amount does not match submitted amount.",
+    bet_invalid_agent: "Selected bot is not eligible for betting right now.",
+  };
+  const base = known[normalized] ?? code.replaceAll("_", " ");
+  const hintText = typeof hint === "string" && hint.trim().length > 0 ? ` ${hint.trim()}` : "";
+  return `${base}${hintText}`.trim();
+}
+
+ws.on("commandResult", (_raw) => {
+  const data = _raw as { requestType?: unknown; result?: unknown };
+  if (data.requestType !== "placeBet") return;
+
+  overlay.setBettingPending(false);
+  profilePanel.setBettingPending(false);
+  const result = data.result as {
+    ok?: unknown;
+    error?: unknown;
+    hint?: unknown;
+    totalPool?: unknown;
+    closed?: unknown;
+    minBet?: unknown;
+    adminWallet?: unknown;
+    odds?: unknown;
+    verifiedAmount?: unknown;
+  };
+
+  if (result && typeof result === "object" && result.ok === true) {
+    const verifiedAmount = Number(result.verifiedAmount);
+    const amountText = Number.isFinite(verifiedAmount) ? verifiedAmount.toFixed(2) : "confirmed";
+    overlay.setBettingSnapshot({
+      closed: typeof result.closed === "boolean" ? result.closed : undefined,
+      totalPool: Number.isFinite(Number(result.totalPool)) ? Number(result.totalPool) : undefined,
+      minBet: Number.isFinite(Number(result.minBet)) ? Number(result.minBet) : undefined,
+      adminWallet: typeof result.adminWallet === "string" ? result.adminWallet : undefined,
+      odds: normalizeBetOdds(result.odds),
+    });
+    overlay.setBettingFeedback(`Bet accepted: ${amountText} ${bettingClientConfig.currency} verified.`, "success");
+    profilePanel.setBettingFeedback(`Bet accepted: ${amountText} ${bettingClientConfig.currency} verified.`, "success");
+    return;
+  }
+
+  const errorMessage = formatBettingError(result?.error, result?.hint);
+  overlay.setBettingFeedback(errorMessage, "error");
+  profilePanel.setBettingFeedback(errorMessage, "error");
+});
+
+ws.on("roomInfo", (_raw) => {
+  const data = _raw as {
+    info: {
+      agents: number;
+      phase?: {
+        phase?: string;
+        endsAt?: number;
+      };
+      survival?: {
+        status?: string;
+        winnerAgentId?: string;
+        winnerAgentIds?: string[];
+        summary?: string;
+        recentRounds?: Array<{
+          status?: string;
+          winnerAgentIds?: string[];
+          winnerNames?: string[];
+          summary?: string;
+        }>;
+      };
+    };
+  };
+  liveHud.setCounts({
+    agents: Number(data.info?.agents ?? overlay.getCount()),
+    battles: battlePanel.getSnapshot().length,
+  });
+  const survivalStatus = data.info?.survival?.status;
+  if (typeof survivalStatus === "string" && survivalStatus.length > 0) {
+    liveHud.pushEvent(`Round status: ${survivalStatus.toUpperCase()}`, "phase");
+    const bettingClosed = survivalStatus !== "active";
+    overlay.setBettingSnapshot({ closed: bettingClosed });
+    profilePanel.setBettingSnapshot({
+      closed: bettingClosed,
+      minBet: bettingClientConfig.minBet,
+      currency: bettingClientConfig.currency,
+    });
+  }
+  updateMatchStateBanner(data.info?.survival);
+  const phase = data.info?.phase?.phase;
+  if (typeof phase === "string" && phase.length > 0) {
+    liveHud.setPhase(phase, Number(data.info?.phase?.endsAt ?? 0));
+  }
+});
+
+refreshHudCounts();
 ws.connect();
 
 // ── Click to select lobster or building ────────────────────────
@@ -611,14 +1104,21 @@ renderer.domElement.addEventListener("click", (event: MouseEvent) => {
 // ── Camera follow ─────────────────────────────────────────────
 
 let followAgentId: string | null = focusAgent;
+if (followAgentId) {
+  liveHud.setFollowing(followAgentId);
+}
 
 window.addEventListener("agent:select", ((e: CustomEvent<{ agentId: string }>) => {
   const agentId = e.detail.agentId;
   if (followAgentId === agentId) {
     // Click again to unfollow
     followAgentId = null;
+    liveHud.setFollowing(null);
   } else {
     followAgentId = agentId;
+    autoCam.disable();
+    updateAutoCamHud();
+    liveHud.setFollowing(displayName(agentId));
     // Snap camera to agent immediately
     const pos = lobsterManager.getPosition(agentId);
     if (pos) {
@@ -630,7 +1130,54 @@ window.addEventListener("agent:select", ((e: CustomEvent<{ agentId: string }>) =
 // Clicking on the 3D scene (not on an agent) unfollows
 renderer.domElement.addEventListener("dblclick", () => {
   followAgentId = null;
+  liveHud.setFollowing(null);
 });
+
+// ── AutoCam UI toggle ─────────────────────────────────────────
+
+function updateAutoCamHud(): void {
+  const btn = document.getElementById("autocam-toggle");
+  if (btn) {
+    btn.classList.toggle("active", autoCam.isEnabled());
+    btn.setAttribute("aria-pressed", autoCam.isEnabled() ? "true" : "false");
+  }
+  if (autoCam.isEnabled()) {
+    followAgentId = null;
+    const modeLabel = autoCam.getMode() === "battle" ? "BATTLE CAM" : "AUTO CAM";
+    liveHud.setFollowing(modeLabel);
+  } else if (!followAgentId) {
+    liveHud.setFollowing(null);
+  }
+}
+
+function toggleAutoCam(): void {
+  autoCam.toggle();
+  if (autoCam.isEnabled()) {
+    followAgentId = null;
+  }
+  updateAutoCamHud();
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "c" || e.key === "C") {
+    const tag = (e.target as HTMLElement)?.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    toggleAutoCam();
+  }
+});
+
+{
+  const btn = document.createElement("button");
+  btn.id = "autocam-toggle";
+  btn.type = "button";
+  btn.className = "autocam-btn";
+  btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg><span>Auto</span>`;
+  btn.title = "Toggle autocam (C)";
+  btn.setAttribute("aria-label", "Toggle autocam");
+  btn.setAttribute("aria-pressed", "false");
+  btn.addEventListener("click", toggleAutoCam);
+  document.body.appendChild(btn);
+}
 
 // ── Animation loop ─────────────────────────────────────────────
 
@@ -640,9 +1187,18 @@ const VIEWPORT_REPORT_INTERVAL = 1.0; // seconds
 function stepFrame(delta: number): void {
   lobsterManager.update(delta);
   effects.update(camera);
+  liveHud.tick();
 
-  // Follow agent: smoothly track their position
-  if (followAgentId) {
+  // AutoCam drives camera when enabled
+  const wasAutoCamEnabled = autoCam.isEnabled();
+  autoCam.update(delta);
+  // If autocam just disabled itself (user grabbed controls), update HUD
+  if (wasAutoCamEnabled && !autoCam.isEnabled()) {
+    updateAutoCamHud();
+  }
+
+  // Follow agent: smoothly track their position (only when autocam is off)
+  if (!autoCam.isEnabled() && followAgentId) {
     const pos = lobsterManager.getPosition(followAgentId);
     if (pos) {
       const target = controls.target;

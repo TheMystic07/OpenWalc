@@ -1,3 +1,312 @@
+# GLTF Lobster Migration Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Replace procedural lobster meshes with the GLTF model (`lobsterDownloaded.gltf`) using its 19 skeletal animations, hue-shifted textures for color variation, and 6 new action types.
+
+**Architecture:** Load GLTF once, clone per-agent via `SkeletonUtils.clone()`. Each clone gets its own `AnimationMixer`. Color variation via canvas hue-shift of the shared texture. Crossfade animations at 200ms.
+
+**Tech Stack:** Three.js 0.170, GLTFLoader, SkeletonUtils, AnimationMixer, CanvasTexture
+
+---
+
+### Task 1: Add new action types to server types
+
+**Files:**
+- Modify: `server/types.ts:71-77` (ActionMessage interface)
+- Modify: `server/index.ts:2249` (help text)
+- Modify: `server/index.ts:2264` (actions array)
+- Modify: `server/index.ts:2322` (type cast)
+
+**Step 1: Update ActionMessage type**
+
+In `server/types.ts`, change line 74 from:
+```typescript
+action: "walk" | "idle" | "wave" | "pinch" | "talk" | "dance" | "backflip" | "spin";
+```
+to:
+```typescript
+action: "walk" | "idle" | "wave" | "pinch" | "talk" | "dance" | "backflip" | "spin" | "eat" | "sit" | "swim" | "fly" | "roll" | "lay";
+```
+
+**Step 2: Update server/index.ts help text and cast**
+
+At line ~2249, update the help text to include the new actions:
+```typescript
+action: '{"command":"world-action","args":{"agentId":"ID","action":"wave"}}  — wave|dance|idle|pinch|talk|backflip|spin|eat|sit|swim|fly|roll|lay',
+```
+
+At line ~2264, update the actions array:
+```typescript
+actions: ["walk","idle","wave","pinch","talk","dance","backflip","spin","eat","sit","swim","fly","roll","lay"],
+```
+
+At line ~2322, update the type cast:
+```typescript
+action: (a.action ?? "idle") as ActionMessage["action"],
+```
+
+**Step 3: Verify types compile**
+
+Run: `npx tsc --noEmit -p tsconfig.server.json`
+Expected: No errors
+
+**Step 4: Commit**
+
+```bash
+git add server/types.ts server/index.ts
+git commit -m "feat: add eat/sit/swim/fly/roll/lay action types"
+```
+
+---
+
+### Task 2: Rewrite lobster.ts — GLTF loader + hue-shift textures
+
+**Files:**
+- Rewrite: `src/scene/lobster.ts`
+
+**Step 1: Replace entire lobster.ts**
+
+Delete all existing content and replace with the GLTF-based module:
+
+```typescript
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { SkeletonUtils } from "three/addons/utils/SkeletonUtils.js";
+
+// ── Shared state ──────────────────────────────────────────────
+const MODEL_PATH = "/Models/lobsterDownloaded.gltf";
+const TEXTURE_PATH = "/Models/LobsterTexture.png";
+
+let cachedGltf: {
+  scene: THREE.Group;
+  animations: THREE.AnimationClip[];
+} | null = null;
+
+let baseTexture: HTMLImageElement | null = null;
+const hueTextureCache = new Map<number, THREE.CanvasTexture>();
+
+// ── Animation clip name map ───────────────────────────────────
+// Maps our game action names → GLTF clip names.
+export const ACTION_TO_CLIP: Record<string, string> = {
+  // Agent actions
+  idle: "Idle_A",
+  walk: "Walk",
+  talk: "Clicked",
+  pinch: "Attack",
+  wave: "Bounce",
+  dance: "Bounce",
+  backflip: "Jump",
+  spin: "Spin",
+  eat: "Eat",
+  sit: "Sit",
+  swim: "Swim",
+  fly: "Fly",
+  roll: "Roll",
+  lay: "Lay",
+  // Combat actions
+  strike: "Attack",
+  guard: "Sit",
+  feint: "Fear",
+  approach: "Run",
+  retreat: "Fear",
+  stunned: "Hit",
+  victory: "Bounce",
+  defeated: "Death",
+  combatReady: "Idle_B",
+};
+
+// Random idle variations cycled every few seconds.
+export const IDLE_VARIANTS = ["Idle_A", "Idle_B", "Idle_C"];
+
+// Clips that should play once (not loop).
+const ONCE_CLIPS = new Set([
+  "Attack", "Jump", "Death", "Hit", "Clicked", "Sit", "Lay",
+]);
+
+/** Pre-load the GLTF model and base texture. Call once at startup. */
+export async function loadLobsterModel(): Promise<void> {
+  if (cachedGltf) return;
+
+  const loader = new GLTFLoader();
+  const [gltf, img] = await Promise.all([
+    loader.loadAsync(MODEL_PATH),
+    loadImage(TEXTURE_PATH),
+  ]);
+
+  cachedGltf = {
+    scene: gltf.scene,
+    animations: gltf.animations,
+  };
+  baseTexture = img;
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+// ── Hue-shift texture ─────────────────────────────────────────
+
+/** Convert a hex color string to a hue angle (0-360). */
+function colorToHue(color: string): number {
+  const c = new THREE.Color(color);
+  const hsl = { h: 0, s: 0, l: 0 };
+  c.getHSL(hsl);
+  return Math.round(hsl.h * 360);
+}
+
+/** Create a hue-shifted texture using canvas filter. */
+function createHueShiftedTexture(hueAngle: number): THREE.CanvasTexture {
+  const existing = hueTextureCache.get(hueAngle);
+  if (existing) return existing;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = baseTexture!.width;
+  canvas.height = baseTexture!.height;
+  const ctx = canvas.getContext("2d")!;
+
+  // Apply hue rotation via CSS filter
+  ctx.filter = `hue-rotate(${hueAngle}deg)`;
+  ctx.drawImage(baseTexture!, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.flipY = false; // GLTF convention
+  tex.colorSpace = THREE.SRGBColorSpace;
+  hueTextureCache.set(hueAngle, tex);
+  return tex;
+}
+
+// ── Instance creation ─────────────────────────────────────────
+
+export interface LobsterInstance {
+  group: THREE.Group;
+  mixer: THREE.AnimationMixer;
+  actions: Map<string, THREE.AnimationAction>;
+  materials: THREE.Material[];
+}
+
+/**
+ * Clone the loaded GLTF model for one agent.
+ * Returns the group, mixer, action map, and materials list.
+ */
+export function createLobsterInstance(color: string): LobsterInstance {
+  if (!cachedGltf) throw new Error("Call loadLobsterModel() first");
+
+  const cloned = SkeletonUtils.clone(cachedGltf.scene) as THREE.Group;
+  cloned.name = "lobster";
+
+  // Scale to match the gameplay footprint (~2.4 units wide).
+  // The GLTF model's raw size needs calibration — adjust this value
+  // after visual testing. Starting estimate based on the mesh bounds.
+  cloned.scale.set(1.8, 1.8, 1.8);
+
+  // Apply hue-shifted texture
+  const hue = colorToHue(color);
+  const tex = createHueShiftedTexture(hue);
+
+  const materials: THREE.Material[] = [];
+  cloned.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.castShadow = true;
+      child.receiveShadow = false;
+      // Clone material so each agent can have independent emissive flashes
+      if (child.material) {
+        const mat = (child.material as THREE.MeshStandardMaterial).clone();
+        mat.map = tex;
+        mat.needsUpdate = true;
+        child.material = mat;
+        materials.push(mat);
+      }
+    }
+  });
+
+  // Build AnimationMixer and pre-create all actions
+  const mixer = new THREE.AnimationMixer(cloned);
+  const actions = new Map<string, THREE.AnimationAction>();
+
+  for (const clip of cachedGltf.animations) {
+    const action = mixer.clipAction(clip);
+    if (ONCE_CLIPS.has(clip.name)) {
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+    } else {
+      action.setLoop(THREE.LoopRepeat, Infinity);
+    }
+    actions.set(clip.name, action);
+  }
+
+  return { group: cloned, mixer, actions, materials };
+}
+
+/**
+ * Crossfade from the current playing action to a new clip.
+ * If already playing the target clip, does nothing.
+ */
+export function crossfadeTo(
+  instance: LobsterInstance,
+  clipName: string,
+  duration = 0.2,
+): void {
+  const target = instance.actions.get(clipName);
+  if (!target) return;
+
+  // Find the currently playing action (highest weight)
+  let current: THREE.AnimationAction | null = null;
+  for (const action of instance.actions.values()) {
+    if (action.isRunning() && action !== target) {
+      if (!current || action.getEffectiveWeight() > current.getEffectiveWeight()) {
+        current = action;
+      }
+    }
+  }
+
+  // If target is already running at full weight, skip
+  if (target.isRunning() && target.getEffectiveWeight() > 0.9) return;
+
+  target.reset();
+  target.setEffectiveTimeScale(1);
+  target.setEffectiveWeight(1);
+  target.play();
+
+  if (current) {
+    current.crossFadeTo(target, duration, true);
+  }
+}
+
+/** Get a random idle variant clip name. */
+export function randomIdleClip(): string {
+  return IDLE_VARIANTS[Math.floor(Math.random() * IDLE_VARIANTS.length)];
+}
+```
+
+**Step 2: Verify it compiles**
+
+Run: `npx tsc --noEmit`
+Expected: No errors (lobster-manager.ts will have errors since it still imports old functions — that's expected, fixed in Task 3)
+
+**Step 3: Commit**
+
+```bash
+git add src/scene/lobster.ts
+git commit -m "feat: replace procedural lobster with GLTF model loader"
+```
+
+---
+
+### Task 3: Rewrite lobster-manager.ts — AnimationMixer integration
+
+**Files:**
+- Rewrite: `src/scene/lobster-manager.ts`
+
+**Step 1: Replace entire lobster-manager.ts**
+
+```typescript
 import * as THREE from "three";
 import {
   loadLobsterModel,
@@ -5,8 +314,8 @@ import {
   crossfadeTo,
   randomIdleClip,
   ACTION_TO_CLIP,
+  type LobsterInstance,
 } from "./lobster.js";
-import type { LobsterInstance } from "./lobster.js";
 import type { AgentProfile, AgentPosition } from "../../server/types.js";
 import type { ParticleEngine } from "./particle-engine.js";
 
@@ -29,7 +338,9 @@ interface LobsterEntry {
   trailTimer: number;
   combatSparkTimer: number;
   lastMoveTime: number;
+  /** Current GLTF clip name playing (to avoid redundant crossfades). */
   currentClip: string;
+  /** Timer for cycling idle variants. */
   idleVariantTimer: number;
 }
 
@@ -42,7 +353,7 @@ interface Obstacle {
 const LOBSTER_RADIUS = 1.8;
 const AVOIDANCE_LOOKAHEAD = 4;
 const AVOIDANCE_FORCE = 6;
-const IDLE_CYCLE_INTERVAL = 5;
+const IDLE_CYCLE_INTERVAL = 5; // seconds between random idle switches
 
 export class LobsterManager {
   private scene: THREE.Scene;
@@ -57,10 +368,10 @@ export class LobsterManager {
     this.scene = scene;
     this.obstacles = obstacles ?? [];
     this.particles = particles ?? null;
+    // Start loading the model immediately
     this.modelReady = loadLobsterModel();
   }
 
-  /** Append additional obstacles (e.g. from async terrain loading). */
   addObstacles(obs: Obstacle[]): void {
     this.obstacles.push(...obs);
   }
@@ -69,12 +380,16 @@ export class LobsterManager {
   addOrUpdate(profile: AgentProfile, position: AgentPosition): void {
     let entry = this.lobsters.get(profile.agentId);
     if (!entry) {
-      // Create a placeholder entry immediately so duplicate calls don't spawn
-      // multiple instances. The actual GLTF instance is wired up asynchronously.
+      // Queue creation — model may still be loading
       this.modelReady.then(() => {
-        // Guard: another addOrUpdate may have already created this entry while
-        // we were waiting for the model.
-        if (this.lobsters.has(profile.agentId)) return;
+        // Check again in case it was added while we waited
+        if (this.lobsters.has(profile.agentId)) {
+          const existing = this.lobsters.get(profile.agentId)!;
+          existing.profile = profile;
+          existing.target = { ...position };
+          existing.dead = false;
+          return;
+        }
         this._createEntry(profile, position);
       });
     } else {
@@ -84,14 +399,13 @@ export class LobsterManager {
     }
   }
 
-  /** Create a fully initialised LobsterEntry once the GLTF model is ready. */
   private _createEntry(profile: AgentProfile, position: AgentPosition): void {
     const inst = createLobsterInstance(profile.color);
     inst.group.position.set(position.x, position.y, position.z);
     inst.group.rotation.y = position.rotation;
     inst.group.userData.agentId = profile.agentId;
 
-    // Inner combat ring
+    // Combat rings (same as before)
     const combatRingMat = new THREE.MeshBasicMaterial({
       color: 0xff5d43,
       transparent: true,
@@ -108,7 +422,6 @@ export class LobsterManager {
     combatRing.visible = false;
     inst.group.add(combatRing);
 
-    // Outer ring for double-ring effect
     const outerRingMat = new THREE.MeshBasicMaterial({
       color: 0xff8844,
       transparent: true,
@@ -127,9 +440,9 @@ export class LobsterManager {
 
     this.scene.add(inst.group);
 
-    // Establish initial idle clip tracking
-    const initialClip = randomIdleClip();
-    crossfadeTo(inst, initialClip, 0);
+    // Start with idle animation
+    const idleClip = randomIdleClip();
+    crossfadeTo(inst, idleClip, 0);
 
     const entry: LobsterEntry = {
       instance: inst,
@@ -150,29 +463,22 @@ export class LobsterManager {
       trailTimer: 0,
       combatSparkTimer: 0,
       lastMoveTime: Date.now(),
-      currentClip: initialClip,
-      idleVariantTimer: IDLE_CYCLE_INTERVAL,
+      currentClip: idleClip,
+      idleVariantTimer: Math.random() * IDLE_CYCLE_INTERVAL,
     };
     this.lobsters.set(profile.agentId, entry);
   }
 
-  /** Update target position for smooth interpolation */
   updatePosition(agentId: string, pos: AgentPosition): void {
     const entry = this.lobsters.get(agentId);
-    if (entry) {
-      entry.target = { ...pos };
-    }
+    if (entry) entry.target = { ...pos };
   }
 
-  /** Set current action/animation */
   setAction(agentId: string, action: string): void {
     const entry = this.lobsters.get(agentId);
-    if (entry) {
-      entry.action = action;
-    }
+    if (entry) entry.action = action;
   }
 
-  /** Play a short-lived action without replacing the persistent action state. */
   triggerAction(agentId: string, action: string, durationMs = 650): void {
     const entry = this.lobsters.get(agentId);
     if (!entry || entry.dead) return;
@@ -218,15 +524,12 @@ export class LobsterManager {
     }
   }
 
-  /** Remove a lobster from the scene */
   remove(agentId: string): void {
     const entry = this.lobsters.get(agentId);
     if (entry) {
-      // Dispose animation mixer
+      this.scene.remove(entry.instance.group);
       entry.instance.mixer.stopAllAction();
       entry.instance.mixer.uncacheRoot(entry.instance.group);
-
-      this.scene.remove(entry.instance.group);
       entry.instance.group.traverse((child) => {
         if (child instanceof THREE.Mesh) {
           child.geometry.dispose();
@@ -241,82 +544,59 @@ export class LobsterManager {
     }
   }
 
-  /** Despawn dead agents after a delay */
   despawnDead(agentId: string, delayMs: number = 5000): void {
     const entry = this.lobsters.get(agentId);
     if (!entry) return;
-
     entry.transientAction = "defeated";
     entry.transientUntil = Date.now() + delayMs;
-
-    // After delay, remove the agent
-    setTimeout(() => {
-      this.remove(agentId);
-    }, delayMs);
+    setTimeout(() => { this.remove(agentId); }, delayMs);
   }
 
-  /** Check if an agent has been idle for too long (returns time since last move in ms) */
   getIdleTime(agentId: string, now: number = Date.now()): number | null {
     const entry = this.lobsters.get(agentId);
     if (!entry) return null;
-
     const dx = entry.target.x - entry.current.x;
     const dz = entry.target.z - entry.current.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
-
-    // If currently moving, reset idle timer
     if (dist > 0.1) {
       entry.lastMoveTime = now;
       return 0;
     }
-
     return entry.lastMoveTime ? now - entry.lastMoveTime : null;
   }
 
-  /** Mark all non-moving agents for removal after idle timeout */
   checkIdleTimeout(idleTimeoutMs: number = 60000): string[] {
     const toRemove: string[] = [];
     const now = Date.now();
-
     for (const [agentId, entry] of this.lobsters) {
-      if (entry.dead) continue; // Don't remove dead agents here (handled separately)
+      if (entry.dead) continue;
       if (entry.lastMoveTime && now - entry.lastMoveTime > idleTimeoutMs) {
         toRemove.push(agentId);
       }
     }
-
     return toRemove;
   }
 
-  /** Get world position for an agent */
   getPosition(agentId: string): THREE.Vector3 | null {
     const entry = this.lobsters.get(agentId);
     if (!entry) return null;
     return entry.instance.group.position.clone();
   }
 
-  /**
-   * Calculate avoidance steering vector to push the lobster away from
-   * nearby obstacles (rocks) and other lobsters.
-   */
   private getAvoidance(agentId: string, cx: number, cz: number, heading: number): { ax: number; az: number } {
     let ax = 0;
     let az = 0;
 
-    // Avoid rocks
     for (const obs of this.obstacles) {
       const dx = cx - obs.x;
       const dz = cz - obs.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       const minDist = obs.radius + LOBSTER_RADIUS;
-
       if (dist < minDist + AVOIDANCE_LOOKAHEAD && dist > 0.01) {
-        // Check if obstacle is roughly ahead (within 120 deg cone)
         const toObsAngle = Math.atan2(-dx, -dz);
         let relAngle = toObsAngle - heading;
         if (relAngle > Math.PI) relAngle -= Math.PI * 2;
         if (relAngle < -Math.PI) relAngle += Math.PI * 2;
-
         if (Math.abs(relAngle) < Math.PI * 0.67) {
           const strength = AVOIDANCE_FORCE * (1 - dist / (minDist + AVOIDANCE_LOOKAHEAD));
           ax += (dx / dist) * strength;
@@ -325,14 +605,12 @@ export class LobsterManager {
       }
     }
 
-    // Avoid other lobsters
     for (const [id, other] of this.lobsters) {
       if (id === agentId) continue;
       const dx = cx - other.current.x;
       const dz = cz - other.current.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       const minDist = LOBSTER_RADIUS * 2;
-
       if (dist < minDist + 2 && dist > 0.01) {
         const strength = AVOIDANCE_FORCE * 0.8 * (1 - dist / (minDist + 2));
         ax += (dx / dist) * strength;
@@ -343,29 +621,28 @@ export class LobsterManager {
     return { ax, az };
   }
 
-  /**
-   * Determine the desired GLTF clip name for a given entry.
-   */
+  /** Resolve the desired GLTF clip name for the current state. */
   private resolveClip(entry: LobsterEntry, moving: boolean): string {
     const activeAction = entry.transientAction ?? entry.action;
 
     if (entry.dead) return "Death";
 
+    // Moving agents always show Walk (or Run for approach)
     if (moving && activeAction !== "guard" && activeAction !== "stunned" && activeAction !== "defeated") {
       if (activeAction === "approach") return "Run";
       if (activeAction === "swim") return "Swim";
       return "Walk";
     }
 
-    const mapped = ACTION_TO_CLIP[activeAction];
-    if (mapped) return mapped;
+    // Direct mapping from action → clip
+    const clip = ACTION_TO_CLIP[activeAction];
+    if (clip) return clip;
 
-    // Fallback
+    // Fallback: combat-ready idle or standard idle
     if (entry.inCombat) return "Idle_B";
     return "Idle_A";
   }
 
-  /** Per-frame update: turn to face target, avoid obstacles, then walk */
   update(delta: number): void {
     const now = Date.now();
     for (const entry of this.lobsters.values()) {
@@ -379,8 +656,6 @@ export class LobsterManager {
       const dx = entry.target.x - entry.current.x;
       const dz = entry.target.z - entry.current.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
-
-      // NaN guard
       if (!isFinite(dx) || !isFinite(dz) || !isFinite(dist)) continue;
 
       const turnSpeed = 4 * delta;
@@ -389,57 +664,39 @@ export class LobsterManager {
       const facingThreshold = 0.25;
 
       if (dist > arrivedThreshold) {
-        // Get avoidance steering
         const { ax, az } = this.getAvoidance(
-          entry.profile.agentId,
-          entry.current.x,
-          entry.current.z,
-          entry.current.rotation
+          entry.profile.agentId, entry.current.x, entry.current.z, entry.current.rotation
         );
-
-        // Blend desired direction with avoidance
         const steerX = dx + ax * delta;
         const steerZ = dz + az * delta;
         const desiredRotation = Math.atan2(steerX, steerZ);
 
-        // Shortest-arc rotation
         let angleDiff = desiredRotation - entry.current.rotation;
         if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
         if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-
-        // Turn toward target
         entry.current.rotation += angleDiff * turnSpeed;
         if (entry.current.rotation > Math.PI) entry.current.rotation -= Math.PI * 2;
         if (entry.current.rotation < -Math.PI) entry.current.rotation += Math.PI * 2;
 
-        // Only move forward once roughly facing the direction
         if (Math.abs(angleDiff) < facingThreshold) {
-          // Move in facing direction (not directly toward target)
-          // This makes the lobster walk forward naturally
           const forwardX = Math.sin(entry.current.rotation);
           const forwardZ = Math.cos(entry.current.rotation);
-          const speed = moveSpeed * Math.min(dist, 1); // Slow down near target
-
+          const speed = moveSpeed * Math.min(dist, 1);
           const newX = entry.current.x + forwardX * speed * 5;
           const newZ = entry.current.z + forwardZ * speed * 5;
 
-          // Hard collision check: don't move into obstacles
           if (!this.isBlocked(entry.profile.agentId, newX, newZ)) {
             entry.current.x = newX;
             entry.current.z = newZ;
           } else {
-            // Try sliding along the obstacle
             if (!this.isBlocked(entry.profile.agentId, newX, entry.current.z)) {
               entry.current.x = newX;
             } else if (!this.isBlocked(entry.profile.agentId, entry.current.x, newZ)) {
               entry.current.z = newZ;
             }
-            // else: fully blocked, stay in place
           }
-
           entry.current.y += (entry.target.y - entry.current.y) * moveSpeed;
 
-          // Small sediment trail when a lobster is actively moving.
           entry.trailTimer -= delta;
           if (entry.trailTimer <= 0) {
             entry.trailTimer = 0.14 + Math.random() * 0.12;
@@ -450,7 +707,6 @@ export class LobsterManager {
           }
         }
       } else {
-        // Already at target -- interpolate to explicit rotation
         let angleDiff = entry.target.rotation - entry.current.rotation;
         if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
         if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
@@ -458,29 +714,21 @@ export class LobsterManager {
         entry.trailTimer = 0;
       }
 
-      entry.instance.group.position.set(
-        entry.current.x,
-        entry.current.y,
-        entry.current.z
-      );
+      entry.instance.group.position.set(entry.current.x, entry.current.y, entry.current.z);
       entry.instance.group.rotation.y = entry.current.rotation;
 
-      // Combat ring pulse around active fighters.
+      // Combat ring visuals (unchanged logic)
       if (entry.inCombat && !entry.dead) {
         entry.combatRing.visible = true;
         entry.outerRing.visible = true;
         const pulse = 0.95 + Math.sin(entry.time * 8) * 0.1;
         entry.combatRing.scale.set(pulse, pulse, pulse);
         entry.combatRingMat.opacity = 0.32 + Math.sin(entry.time * 8) * 0.12;
-
-        // Outer ring counter-rotates and pulses offset
         const outerPulse = 0.93 + Math.sin(entry.time * 6 + 1.5) * 0.08;
         entry.outerRing.scale.set(outerPulse, outerPulse, outerPulse);
         entry.outerRingMat.opacity = 0.18 + Math.sin(entry.time * 6 + 1.5) * 0.08;
         entry.outerRing.rotation.z = entry.time * 0.8;
         entry.combatRing.rotation.z = -entry.time * 0.5;
-
-        // Persistent combat sparks make active fights readable even between turns.
         entry.combatSparkTimer -= delta;
         if (entry.combatSparkTimer <= 0) {
           entry.combatSparkTimer = 0.07 + Math.random() * 0.05;
@@ -492,7 +740,7 @@ export class LobsterManager {
         entry.combatSparkTimer = 0;
       }
 
-      // Hit flash makes active exchanges readable at a glance.
+      // Hit flash on materials
       const flash = entry.impactPulse;
       for (const mat of entry.instance.materials) {
         if (!("emissive" in mat) || !("emissiveIntensity" in mat)) continue;
@@ -501,31 +749,28 @@ export class LobsterManager {
         emMat.emissiveIntensity = flash * 0.85;
       }
 
-      // ── Animation dispatch ──────────────────────────────────────────
+      // ── Animation dispatch ────────────────────────────────
       const moving = dist > arrivedThreshold;
       const desiredClip = this.resolveClip(entry, moving);
 
-      // Idle variant cycling: when idle and no transient action, cycle between
-      // Idle_A / Idle_B / Idle_C every IDLE_CYCLE_INTERVAL seconds.
-      if (!moving && !entry.transientAction && !entry.dead && !entry.inCombat) {
+      // Random idle variant cycling
+      if (desiredClip.startsWith("Idle_") && !entry.transientAction && entry.action === "idle") {
         entry.idleVariantTimer -= delta;
         if (entry.idleVariantTimer <= 0) {
-          entry.idleVariantTimer = IDLE_CYCLE_INTERVAL;
-          const newIdleClip = randomIdleClip();
-          if (newIdleClip !== entry.currentClip) {
-            crossfadeTo(entry.instance, newIdleClip);
-            entry.currentClip = newIdleClip;
+          entry.idleVariantTimer = IDLE_CYCLE_INTERVAL + Math.random() * 3;
+          const variant = randomIdleClip();
+          if (variant !== entry.currentClip) {
+            crossfadeTo(entry.instance, variant, 0.4);
+            entry.currentClip = variant;
           }
         }
-      } else {
-        // Reset timer so it starts fresh when idle resumes
-        entry.idleVariantTimer = IDLE_CYCLE_INTERVAL;
       }
 
-      // Crossfade to the resolved clip if it has changed
+      // Switch clip if different from what's currently playing
       if (desiredClip !== entry.currentClip) {
         crossfadeTo(entry.instance, desiredClip);
         entry.currentClip = desiredClip;
+        entry.idleVariantTimer = IDLE_CYCLE_INTERVAL + Math.random() * 3;
       }
 
       // Advance the mixer
@@ -534,7 +779,6 @@ export class LobsterManager {
 
     this.particles?.update(delta);
 
-    // Animate room particles
     const animateFn = this.scene.userData.animateParticles as
       | ((time: number) => void)
       | undefined;
@@ -543,17 +787,13 @@ export class LobsterManager {
     }
   }
 
-  /** Check if a position would collide with any obstacle or another lobster */
   private isBlocked(agentId: string, x: number, z: number): boolean {
-    // Check rocks
     for (const obs of this.obstacles) {
       const dx = x - obs.x;
       const dz = z - obs.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist < obs.radius + LOBSTER_RADIUS * 0.5) return true;
     }
-
-    // Check other lobsters
     for (const [id, other] of this.lobsters) {
       if (id === agentId) continue;
       const dx = x - other.current.x;
@@ -561,28 +801,19 @@ export class LobsterManager {
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist < LOBSTER_RADIUS * 1.5) return true;
     }
-
     return false;
   }
 
-  /** Raycast pick: returns agentId of clicked lobster, or null */
-  pick(
-    event: MouseEvent,
-    camera: THREE.Camera,
-    domElement: HTMLElement
-  ): string | null {
+  pick(event: MouseEvent, camera: THREE.Camera, domElement: HTMLElement): string | null {
     const rect = domElement.getBoundingClientRect();
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
     this.raycaster.setFromCamera(this.pointer, camera);
 
     const meshes: THREE.Mesh[] = [];
     for (const entry of this.lobsters.values()) {
       entry.instance.group.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          meshes.push(child);
-        }
+        if (child instanceof THREE.Mesh) meshes.push(child);
       });
     }
 
@@ -597,8 +828,138 @@ export class LobsterManager {
     return null;
   }
 
-  /** Get all current agent IDs */
   getAgentIds(): string[] {
     return Array.from(this.lobsters.keys());
   }
 }
+```
+
+**Step 2: Verify types compile**
+
+Run: `npx tsc --noEmit`
+Expected: No errors
+
+**Step 3: Commit**
+
+```bash
+git add src/scene/lobster-manager.ts
+git commit -m "feat: integrate AnimationMixer and GLTF clips into LobsterManager"
+```
+
+---
+
+### Task 4: Update main.ts for async model preload
+
+**Files:**
+- Modify: `src/main.ts:62` (LobsterManager constructor area)
+
+**Step 1: Add model preload import and call**
+
+At the top of main.ts, add the import:
+```typescript
+import { loadLobsterModel } from "./scene/lobster.js";
+```
+
+The `LobsterManager` constructor already calls `loadLobsterModel()` internally, but for a better loading experience, we can kick off the preload immediately alongside scene setup. After line 56 (after `createScene()`), add:
+```typescript
+// Kick off GLTF lobster model load early (LobsterManager awaits this internally)
+loadLobsterModel().catch((err) => console.warn("[main] Lobster model load failed:", err));
+```
+
+This ensures the model starts loading before terrain and buildings resolve, so lobsters appear faster.
+
+**Step 2: Verify it compiles and runs**
+
+Run: `npx tsc --noEmit`
+Expected: No errors
+
+Run: `npm run dev`
+Expected: Dev server starts, world loads, lobsters render with the GLTF model
+
+**Step 3: Commit**
+
+```bash
+git add src/main.ts
+git commit -m "feat: preload GLTF lobster model at startup"
+```
+
+---
+
+### Task 5: Visual tuning and scale calibration
+
+**Files:**
+- Modify: `src/scene/lobster.ts` (scale value)
+
+**Step 1: Open the world in browser**
+
+Navigate to `http://localhost:3000/world.html` and observe the lobster model size relative to the terrain, buildings, and combat rings.
+
+**Step 2: Adjust scale**
+
+The initial scale is `1.8` in `createLobsterInstance()`. Tune this value up or down until the lobster fits the same footprint as the old procedural lobster (~2.4 units across). The combat rings at 1.7-2.4 inner/outer radius should visually wrap the model.
+
+Also check:
+- `tex.flipY` — GLTF usually expects `false`, but verify the texture isn't upside-down
+- Shadow rendering — lobster should cast ground shadows
+- Hue shifting — different agent colors should produce distinctly colored lobsters
+
+**Step 3: Commit final scale**
+
+```bash
+git add src/scene/lobster.ts
+git commit -m "fix: calibrate GLTF lobster scale and texture orientation"
+```
+
+---
+
+### Task 6: Update skill documentation
+
+**Files:**
+- Modify: `skills/openclaw-world-agent/SKILL.md`
+- Modify: `skills/world-room/SKILL.md`
+
+**Step 1: Add new actions to skill docs**
+
+Find the section listing available actions and add `eat`, `sit`, `swim`, `fly`, `roll`, `lay` with descriptions.
+
+**Step 2: Commit**
+
+```bash
+git add skills/
+git commit -m "docs: add new action types to skill documentation"
+```
+
+---
+
+### Task 7: Run full verification
+
+**Step 1: Type check server**
+
+Run: `npx tsc --noEmit -p tsconfig.server.json`
+Expected: No errors
+
+**Step 2: Type check frontend**
+
+Run: `npx tsc --noEmit`
+Expected: No errors
+
+**Step 3: Run tests**
+
+Run: `npm test`
+Expected: All tests pass
+
+**Step 4: Visual verification**
+
+Run: `npm run dev`
+Navigate to `http://localhost:3000/world.html`
+Verify:
+- Lobsters render as GLTF models (not spheres/cylinders)
+- Different colors via hue-shifted textures
+- Walking animation plays when moving
+- Idle animations cycle between A/B/C variants
+- Combat animations play during battles
+- Death animation plays on KO
+- Hit flash still works
+- Combat rings still pulse
+- Particles still emit
+- Labels/bubbles still anchor correctly (CSS2DRenderer finds `name === "lobster"`)
