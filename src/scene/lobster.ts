@@ -68,8 +68,6 @@ const ONE_SHOT_CLIPS = new Set<string>([
 
 let cachedScene: THREE.Group | null = null;
 let cachedClips: THREE.AnimationClip[] = [];
-/** The original texture from the GLTF, grabbed on first clone. */
-let baseTextureImage: HTMLImageElement | null = null;
 const colorTextureCache = new Map<string, THREE.CanvasTexture>();
 
 // ── Model loader ─────────────────────────────────────────────────────
@@ -95,72 +93,82 @@ export async function loadLobsterModel(): Promise<void> {
 
 // ── Color-swap texture ────────────────────────────────────────────────
 
-/**
- * Grab the base texture image from the GLTF scene on first call.
- * We need the raw HTMLImageElement to read pixels for color swapping.
- */
+/** Grab the base texture from the GLTF scene (works with any image type). */
+let baseTexture: THREE.Texture | null = null;
+
 function ensureBaseTexture(): void {
-  if (baseTextureImage) return;
+  if (baseTexture) return;
   cachedScene!.traverse((child) => {
-    if (baseTextureImage) return;
+    if (baseTexture) return;
     if (!(child instanceof THREE.Mesh)) return;
     const mat = Array.isArray(child.material) ? child.material[0] : child.material;
     const tex = (mat as THREE.MeshStandardMaterial).map;
-    if (tex?.image instanceof HTMLImageElement) {
-      baseTextureImage = tex.image;
-    }
+    if (tex) baseTexture = tex;
   });
 }
 
 /**
- * Check if a pixel is in the orange range (the lobster body color).
- * Orange in RGB: high red, medium green, low blue.
+ * Check if a pixel is a body color (reds, pinks, yellows/golds) vs
+ * the near-white (#f9f8f2) and dark (#292939) which should stay fixed.
+ *
+ * Palette colors to swap (body):
+ *   #fff263, #ffdf69, #f2c34b (yellows)
+ *   #ff9090, #f27271, #cc7d95, #e05f5f, #b84444 (reds/pinks)
+ * Keep untouched:
+ *   #f9f8f2 (near-white — eyes/highlights)
+ *   #292939 (dark — outlines/pupils)
+ *   #63cdff (blue — accents)
  */
-function isOrangePixel(r: number, g: number, b: number): boolean {
-  return r > 150 && g > 60 && g < 200 && b < 100 && r > g;
+function isBodyPixel(r: number, g: number, b: number): boolean {
+  // Near-white: all channels > 240
+  if (r > 240 && g > 240 && b > 230) return false;
+  // Dark: all channels < 70
+  if (r < 70 && g < 70 && b < 70) return false;
+  // Blue accent: low R, high G, high B
+  if (r < 120 && g > 180 && b > 220) return false;
+  // Everything else is body color
+  return true;
 }
 
 /**
- * Create a recolored copy of the base texture where orange pixels
- * are replaced with the agent's color, preserving luminance variation.
+ * Create a recolored copy of the base texture where body-colored pixels
+ * are tinted to the agent's color, preserving luminance variation.
  */
 function getColorSwappedTexture(color: string): THREE.CanvasTexture {
   const cached = colorTextureCache.get(color);
   if (cached) return cached;
 
   ensureBaseTexture();
-  if (!baseTextureImage) {
-    // Fallback: return an empty texture (model will use GLTF default)
-    const tex = new THREE.CanvasTexture(document.createElement("canvas"));
-    return tex;
-  }
 
-  const img = baseTextureImage;
-  const w = img.naturalWidth || img.width;
-  const h = img.naturalHeight || img.height;
+  // Draw the base texture image onto a canvas (works for HTMLImage, ImageBitmap, etc.)
+  const source = baseTexture!.image;
+  const w = source.width || 8;
+  const h = source.height || 8;
 
   const canvas = document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(img, 0, 0);
+  ctx.drawImage(source, 0, 0);
 
   const imageData = ctx.getImageData(0, 0, w, h);
   const data = imageData.data;
 
   const target = new THREE.Color(color);
-  const tR = Math.round(target.r * 255);
-  const tG = Math.round(target.g * 255);
-  const tB = Math.round(target.b * 255);
+  const tR = target.r * 255;
+  const tG = target.g * 255;
+  const tB = target.b * 255;
 
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    if (isOrangePixel(r, g, b)) {
-      // Preserve relative brightness: use original luminance as a multiplier
+    if (isBodyPixel(r, g, b)) {
+      // Luminance of original pixel as a brightness multiplier
       const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
-      data[i]     = Math.min(255, Math.round(tR * lum * 1.4));
-      data[i + 1] = Math.min(255, Math.round(tG * lum * 1.4));
-      data[i + 2] = Math.min(255, Math.round(tB * lum * 1.4));
+      // Scale by ~1.3 so the target color doesn't get too dark
+      const scale = Math.min(lum * 1.3, 1);
+      data[i]     = Math.min(255, Math.round(tR * scale));
+      data[i + 1] = Math.min(255, Math.round(tG * scale));
+      data[i + 2] = Math.min(255, Math.round(tB * scale));
     }
   }
 
