@@ -68,6 +68,9 @@ const ONE_SHOT_CLIPS = new Set<string>([
 
 let cachedScene: THREE.Group | null = null;
 let cachedClips: THREE.AnimationClip[] = [];
+/** The original texture from the GLTF, grabbed on first clone. */
+let baseTextureImage: HTMLImageElement | null = null;
+const colorTextureCache = new Map<string, THREE.CanvasTexture>();
 
 // ── Model loader ─────────────────────────────────────────────────────
 
@@ -90,15 +93,95 @@ export async function loadLobsterModel(): Promise<void> {
   );
 }
 
+// ── Color-swap texture ────────────────────────────────────────────────
+
+/**
+ * Grab the base texture image from the GLTF scene on first call.
+ * We need the raw HTMLImageElement to read pixels for color swapping.
+ */
+function ensureBaseTexture(): void {
+  if (baseTextureImage) return;
+  cachedScene!.traverse((child) => {
+    if (baseTextureImage) return;
+    if (!(child instanceof THREE.Mesh)) return;
+    const mat = Array.isArray(child.material) ? child.material[0] : child.material;
+    const tex = (mat as THREE.MeshStandardMaterial).map;
+    if (tex?.image instanceof HTMLImageElement) {
+      baseTextureImage = tex.image;
+    }
+  });
+}
+
+/**
+ * Check if a pixel is in the orange range (the lobster body color).
+ * Orange in RGB: high red, medium green, low blue.
+ */
+function isOrangePixel(r: number, g: number, b: number): boolean {
+  return r > 150 && g > 60 && g < 200 && b < 100 && r > g;
+}
+
+/**
+ * Create a recolored copy of the base texture where orange pixels
+ * are replaced with the agent's color, preserving luminance variation.
+ */
+function getColorSwappedTexture(color: string): THREE.CanvasTexture {
+  const cached = colorTextureCache.get(color);
+  if (cached) return cached;
+
+  ensureBaseTexture();
+  if (!baseTextureImage) {
+    // Fallback: return an empty texture (model will use GLTF default)
+    const tex = new THREE.CanvasTexture(document.createElement("canvas"));
+    return tex;
+  }
+
+  const img = baseTextureImage;
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(img, 0, 0);
+
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+
+  const target = new THREE.Color(color);
+  const tR = Math.round(target.r * 255);
+  const tG = Math.round(target.g * 255);
+  const tB = Math.round(target.b * 255);
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    if (isOrangePixel(r, g, b)) {
+      // Preserve relative brightness: use original luminance as a multiplier
+      const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+      data[i]     = Math.min(255, Math.round(tR * lum * 1.4));
+      data[i + 1] = Math.min(255, Math.round(tG * lum * 1.4));
+      data[i + 2] = Math.min(255, Math.round(tB * lum * 1.4));
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.flipY = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  colorTextureCache.set(color, tex);
+  return tex;
+}
+
 // ── Instance creator ─────────────────────────────────────────────────
 
 /**
- * Clone the cached GLTF model, wire up an AnimationMixer with all clips,
- * and return a LobsterInstance. Uses the model's original texture as-is.
+ * Clone the cached GLTF model, swap orange pixels to the agent's color,
+ * wire up an AnimationMixer with all clips, and return a LobsterInstance.
  *
  * Requires `loadLobsterModel()` to have completed first.
  */
-export function createLobsterInstance(_color: string): LobsterInstance {
+export function createLobsterInstance(color: string): LobsterInstance {
   if (!cachedScene) {
     throw new Error("[lobster] Model not loaded — call loadLobsterModel() first");
   }
@@ -108,18 +191,17 @@ export function createLobsterInstance(_color: string): LobsterInstance {
   cloned.name = "lobster";
   cloned.scale.setScalar(0.025);
 
-  // Collect materials (clone per instance so emissive hit-flash is independent)
+  // Color-swapped texture for this agent
+  const swappedTex = getColorSwappedTexture(color);
+
+  // Collect materials — unlit MeshBasicMaterial with swapped texture
   const materials: THREE.Material[] = [];
 
   cloned.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return;
     child.castShadow = true;
 
-    // Use MeshBasicMaterial (unlit) so the texture shows at full brightness
-    // like Blender's Material Preview — no scene lighting affects it.
-    const srcMat = Array.isArray(child.material) ? child.material[0] : child.material;
-    const tex = (srcMat as THREE.MeshStandardMaterial).map;
-    const basicMat = new THREE.MeshBasicMaterial({ map: tex });
+    const basicMat = new THREE.MeshBasicMaterial({ map: swappedTex });
     materials.push(basicMat);
     child.material = basicMat;
   });
