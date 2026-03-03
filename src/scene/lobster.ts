@@ -169,7 +169,7 @@ export function createLobsterInstance(color: string): LobsterInstance {
   // Clone with skeleton awareness so bone bindings remain correct
   const cloned = SkeletonUtils.clone(cachedScene) as THREE.Group;
   cloned.name = "lobster";
-  cloned.scale.setScalar(1.8);
+  cloned.scale.setScalar(0.025);
 
   // Hue-shifted texture for this agent
   const hue = colorToHue(color);
