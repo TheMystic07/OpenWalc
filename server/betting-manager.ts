@@ -17,6 +17,11 @@ export interface PayoutReport {
   generatedAt: number;
 }
 
+export interface BettingRuntimeState {
+  bets: Bet[];
+  closed: boolean;
+}
+
 const MAX_AGENT_ID_LENGTH = 128;
 const MAX_WALLET_LENGTH = 128;
 const MAX_TX_HASH_LENGTH = 160;
@@ -157,6 +162,46 @@ export class BettingManager {
 
   isClosed(): boolean {
     return this.closed;
+  }
+
+  exportRuntimeState(): BettingRuntimeState {
+    return {
+      bets: this.bets.map((bet) => ({ ...bet })),
+      closed: this.closed,
+    };
+  }
+
+  restoreRuntimeState(state: BettingRuntimeState | null | undefined): void {
+    this.bets = [];
+    this.txHashes.clear();
+    this.closed = false;
+    if (!state) return;
+
+    if (Array.isArray(state.bets)) {
+      for (const rawBet of state.bets) {
+        const normalizedWallet = normalizeStringField(rawBet.bettorWallet ?? "", MAX_WALLET_LENGTH);
+        const normalizedAgentId = normalizeStringField(rawBet.agentId ?? "", MAX_AGENT_ID_LENGTH);
+        const normalizedTxHash = normalizeStringField(rawBet.txHash ?? "", MAX_TX_HASH_LENGTH);
+        const normalizedAmount = Number(rawBet.amount);
+        const placedAt = Number(rawBet.placedAt);
+        if (!normalizedWallet || !normalizedAgentId || !normalizedTxHash) continue;
+        if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) continue;
+        if (!Number.isFinite(placedAt) || placedAt <= 0) continue;
+        if (this.txHashes.has(normalizedTxHash)) continue;
+
+        const bet: Bet = {
+          bettorWallet: normalizedWallet,
+          agentId: normalizedAgentId,
+          amount: normalizedAmount,
+          txHash: normalizedTxHash,
+          placedAt,
+        };
+        this.bets.push(bet);
+        this.txHashes.add(normalizedTxHash);
+      }
+    }
+
+    this.closed = state.closed === true;
   }
 
   reset(): void {

@@ -3,7 +3,6 @@ import {
   loadLobsterModel,
   createLobsterInstance,
   crossfadeTo,
-  randomIdleClip,
   ACTION_TO_CLIP,
 } from "./lobster.js";
 import type { LobsterInstance } from "./lobster.js";
@@ -30,7 +29,6 @@ interface LobsterEntry {
   combatSparkTimer: number;
   lastMoveTime: number;
   currentClip: string;
-  idleVariantTimer: number;
 }
 
 interface Obstacle {
@@ -42,8 +40,6 @@ interface Obstacle {
 const LOBSTER_RADIUS = 1.8;
 const AVOIDANCE_LOOKAHEAD = 4;
 const AVOIDANCE_FORCE = 6;
-const IDLE_CYCLE_INTERVAL = 5;
-
 export class LobsterManager {
   private scene: THREE.Scene;
   private lobsters = new Map<string, LobsterEntry>();
@@ -128,7 +124,7 @@ export class LobsterManager {
     this.scene.add(inst.group);
 
     // Establish initial idle clip tracking
-    const initialClip = randomIdleClip();
+    const initialClip = "Idle_A";
     crossfadeTo(inst, initialClip, 0);
 
     const entry: LobsterEntry = {
@@ -151,7 +147,6 @@ export class LobsterManager {
       combatSparkTimer: 0,
       lastMoveTime: Date.now(),
       currentClip: initialClip,
-      idleVariantTimer: IDLE_CYCLE_INTERVAL,
     };
     this.lobsters.set(profile.agentId, entry);
   }
@@ -361,8 +356,15 @@ export class LobsterManager {
     if (mapped) return mapped;
 
     // Fallback
-    if (entry.inCombat) return "Idle_B";
+    if (entry.inCombat) return "Idle_A";
     return "Idle_A";
+  }
+
+  private getCrossfadeDuration(fromClip: string, toClip: string): number {
+    if (fromClip === "Idle_A" || toClip === "Idle_A") {
+      return 0.65;
+    }
+    return 0.45;
   }
 
   /** Per-frame update: turn to face target, avoid obstacles, then walk */
@@ -495,7 +497,7 @@ export class LobsterManager {
       // Hit flash — tint the MeshBasicMaterial color toward red on impact.
       const flash = entry.impactPulse;
       for (const mat of entry.instance.materials) {
-        if (!(mat instanceof THREE.MeshBasicMaterial)) continue;
+        if (!(mat instanceof THREE.MeshBasicMaterial || mat instanceof THREE.MeshStandardMaterial)) continue;
         if (flash > 0) {
           mat.color.setHex(0xff6a4d).lerp(new THREE.Color(0xffffff), 1 - flash);
         } else {
@@ -507,26 +509,10 @@ export class LobsterManager {
       const moving = dist > arrivedThreshold;
       const desiredClip = this.resolveClip(entry, moving);
 
-      // Idle variant cycling: when idle and no transient action, cycle between
-      // Idle_A / Idle_B / Idle_C every IDLE_CYCLE_INTERVAL seconds.
-      if (!moving && !entry.transientAction && !entry.dead && !entry.inCombat) {
-        entry.idleVariantTimer -= delta;
-        if (entry.idleVariantTimer <= 0) {
-          entry.idleVariantTimer = IDLE_CYCLE_INTERVAL;
-          const newIdleClip = randomIdleClip();
-          if (newIdleClip !== entry.currentClip) {
-            crossfadeTo(entry.instance, newIdleClip);
-            entry.currentClip = newIdleClip;
-          }
-        }
-      } else {
-        // Reset timer so it starts fresh when idle resumes
-        entry.idleVariantTimer = IDLE_CYCLE_INTERVAL;
-      }
-
       // Crossfade to the resolved clip if it has changed
       if (desiredClip !== entry.currentClip) {
-        crossfadeTo(entry.instance, desiredClip);
+        const fadeSeconds = this.getCrossfadeDuration(entry.currentClip, desiredClip);
+        crossfadeTo(entry.instance, desiredClip, fadeSeconds);
         entry.currentClip = desiredClip;
       }
 

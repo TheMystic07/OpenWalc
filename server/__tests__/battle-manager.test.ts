@@ -308,48 +308,57 @@ describe("BattleManager", () => {
   // ── Momentum read bonus ───────────────────────────────────────
 
   describe("Momentum read bonus", () => {
-    it("awards +5 damage when opponent repeats intent", () => {
+    it("awards +15 damage after opponent repeats same intent 3 times", () => {
       const { battle } = startNearby(manager);
       const battleId = battle.battleId;
 
-      // Turn 1: A strikes, B guards
+      // Turn 1-3: B keeps guarding.
       manager.submitIntent("lobster-a", battleId, "strike", 1100);
       manager.submitIntent("lobster-b", battleId, "guard", 1200);
+      manager.submitIntent("lobster-a", battleId, "strike", 1300);
+      manager.submitIntent("lobster-b", battleId, "guard", 1400);
+      manager.submitIntent("lobster-a", battleId, "strike", 1500);
+      manager.submitIntent("lobster-b", battleId, "guard", 1600);
 
-      // Turn 2: A strikes again, B guards again (both repeat)
+      // Turn 4: same guard again -> readable +15 bonus for attacker.
+      manager.submitIntent("lobster-a", battleId, "strike", 1700);
+      const result = manager.submitIntent("lobster-b", battleId, "guard", 1800);
+      if (!result.ok) throw new Error(result.error);
+
+      const round = result.events.find((ev) => ev.phase === "round");
+      expect(round?.damage?.["lobster-b"]).toBe(25);
+      expect(round?.readBonus?.["lobster-a"]).toBe(15);
+    });
+
+    it("does not award read bonus before 3-repeat threshold", () => {
+      const { battle } = startNearby(manager);
+      const battleId = battle.battleId;
+      manager.submitIntent("lobster-a", battleId, "strike", 1100);
+      manager.submitIntent("lobster-b", battleId, "guard", 1200);
       manager.submitIntent("lobster-a", battleId, "strike", 1300);
       const result = manager.submitIntent("lobster-b", battleId, "guard", 1400);
       if (!result.ok) throw new Error(result.error);
 
       const round = result.events.find((ev) => ev.phase === "round");
-      // A reads B's guard repeat -> +5 to A's attack
-      // strike vs guard = 10, + 5 read = 15 damage to B
-      expect(round?.damage?.["lobster-b"]).toBe(15);
-      expect(round?.readBonus?.["lobster-a"]).toBe(5);
-    });
-
-    it("does not award read bonus on first turn", () => {
-      const { battle } = startNearby(manager);
-      manager.submitIntent("lobster-a", battle.battleId, "strike", 1100);
-      const result = manager.submitIntent("lobster-b", battle.battleId, "guard", 1200);
-      if (!result.ok) throw new Error(result.error);
-
-      const round = result.events.find((ev) => ev.phase === "round");
       expect(round?.readBonus).toBeUndefined();
-      expect(round?.damage?.["lobster-b"]).toBe(10); // no bonus
+      expect(round?.damage?.["lobster-b"]).toBe(10);
     });
 
-    it("does not award read bonus when opponent changes intent", () => {
+    it("does not award read bonus when opponent breaks their streak", () => {
       const { battle } = startNearby(manager);
       const battleId = battle.battleId;
 
-      // Turn 1: A strikes, B guards
+      // Build a 3x guard streak.
       manager.submitIntent("lobster-a", battleId, "strike", 1100);
       manager.submitIntent("lobster-b", battleId, "guard", 1200);
-
-      // Turn 2: A feints (changed), B strikes (changed)
       manager.submitIntent("lobster-a", battleId, "feint", 1300);
-      const result = manager.submitIntent("lobster-b", battleId, "strike", 1400);
+      manager.submitIntent("lobster-b", battleId, "guard", 1400);
+      manager.submitIntent("lobster-a", battleId, "approach", 1500);
+      manager.submitIntent("lobster-b", battleId, "guard", 1600);
+
+      // B switches to strike -> no read bonus.
+      manager.submitIntent("lobster-a", battleId, "feint", 1700);
+      const result = manager.submitIntent("lobster-b", battleId, "strike", 1800);
       if (!result.ok) throw new Error(result.error);
 
       const round = result.events.find((ev) => ev.phase === "round");
@@ -360,19 +369,83 @@ describe("BattleManager", () => {
       const { battle } = startNearby(manager);
       const battleId = battle.battleId;
 
-      // Turn 1: both guard
+      // Turn 1-3: both guard.
       manager.submitIntent("lobster-a", battleId, "guard", 1100);
       manager.submitIntent("lobster-b", battleId, "guard", 1200);
-
-      // Turn 2: both guard again (repeat, but guard deals 0)
       manager.submitIntent("lobster-a", battleId, "guard", 1300);
-      const result = manager.submitIntent("lobster-b", battleId, "guard", 1400);
+      manager.submitIntent("lobster-b", battleId, "guard", 1400);
+      manager.submitIntent("lobster-a", battleId, "guard", 1500);
+      manager.submitIntent("lobster-b", battleId, "guard", 1600);
+
+      // Turn 4: repeat again, still 0 damage each.
+      manager.submitIntent("lobster-a", battleId, "guard", 1700);
+      const result = manager.submitIntent("lobster-b", battleId, "guard", 1800);
       if (!result.ok) throw new Error(result.error);
 
       const round = result.events.find((ev) => ev.phase === "round");
-      // Guard deals 0 base, read bonus should NOT make it 5
       expect(round?.damage?.["lobster-a"]).toBe(0);
       expect(round?.damage?.["lobster-b"]).toBe(0);
+    });
+  });
+
+  // â”€â”€ Critical hits â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  describe("Critical hits", () => {
+    it("flags critical hits when strike lands under 30 HP and chance passes", () => {
+      const critManager = new BattleManager({ random: () => 0.0 });
+      const { battle } = startNearby(critManager, 1000);
+      const battleId = battle.battleId;
+
+      // Bring lobster-b below 30 HP with strike vs feint (28 damage each round).
+      for (let turn = 0; turn < 3; turn++) {
+        critManager.submitIntent("lobster-a", battleId, "strike", 1100 + turn * 20);
+        const resolve = critManager.submitIntent("lobster-b", battleId, "feint", 1110 + turn * 20);
+        if (!resolve.ok) throw new Error(resolve.error);
+      }
+
+      // Next strike should crit: strike vs guard base 10, doubled to 20.
+      critManager.submitIntent("lobster-a", battleId, "strike", 2000);
+      const result = critManager.submitIntent("lobster-b", battleId, "guard", 2010);
+      if (!result.ok) throw new Error(result.error);
+
+      const round = result.events.find((ev) => ev.phase === "round");
+      expect(round?.criticalHits).toContain("lobster-a");
+      expect(round?.damage?.["lobster-b"]).toBe(20);
+    });
+
+    it("does not crit when chance check fails", () => {
+      const nonCritManager = new BattleManager({ random: () => 0.99 });
+      const { battle } = startNearby(nonCritManager, 1000);
+      const battleId = battle.battleId;
+
+      for (let turn = 0; turn < 3; turn++) {
+        nonCritManager.submitIntent("lobster-a", battleId, "strike", 1100 + turn * 20);
+        const resolve = nonCritManager.submitIntent("lobster-b", battleId, "feint", 1110 + turn * 20);
+        if (!resolve.ok) throw new Error(resolve.error);
+      }
+
+      nonCritManager.submitIntent("lobster-a", battleId, "strike", 2000);
+      const result = nonCritManager.submitIntent("lobster-b", battleId, "guard", 2010);
+      if (!result.ok) throw new Error(result.error);
+
+      const round = result.events.find((ev) => ev.phase === "round");
+      expect(round?.criticalHits).toBeUndefined();
+      expect(round?.damage?.["lobster-b"]).toBe(10);
+    });
+
+    it("prevents battle starts when combat is disabled by phase", () => {
+      const gatedManager = new BattleManager({ combatAllowedCheck: () => false });
+      const result = gatedManager.startBattle(
+        "lobster-a",
+        "lobster-b",
+        makePos("lobster-a", 0, 0),
+        makePos("lobster-b", 3, 4),
+        undefined,
+        1000,
+      );
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error).toMatch(/combat is currently disabled/i);
     });
   });
 

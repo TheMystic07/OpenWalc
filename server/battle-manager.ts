@@ -10,6 +10,8 @@ const BATTLE_START_RANGE = 12;
 const MAX_HP = 100;
 const MAX_STAMINA = 100;
 const TURN_TIMEOUT_MS = 30_000;
+const CRIT_CHANCE = 0.15;
+const MOMENTUM_REPEAT_THRESHOLD = 3;
 
 /** Stamina cost per intent (guard recovers instead) */
 const STAMINA_COST: Record<BattleIntent, number> = {
@@ -21,7 +23,17 @@ const STAMINA_COST: Record<BattleIntent, number> = {
 };
 
 const GUARD_STAMINA_RECOVERY = 10;
-const MOMENTUM_READ_BONUS = 5;
+const MOMENTUM_READ_BONUS = 15;
+
+export interface BattleManagerOptions {
+  random?: () => number;
+  combatAllowedCheck?: () => boolean;
+}
+
+interface IntentStreak {
+  intent: BattleIntent | null;
+  count: number;
+}
 
 interface ActiveBattle {
   battleId: string;
@@ -30,8 +42,8 @@ interface ActiveBattle {
   power: Record<string, number>;
   stamina: Record<string, number>;
   intents: Partial<Record<string, BattleIntent>>;
-  /** Previous turn's intents for momentum detection */
-  prevIntents: Partial<Record<string, BattleIntent>>;
+  /** Track repeat streak to apply readable penalty on following turns */
+  intentStreak: Record<string, IntentStreak>;
   turn: number;
   startedAt: number;
   updatedAt: number;
@@ -45,6 +57,13 @@ export class BattleManager {
   private battles = new Map<string, ActiveBattle>();
   private agentToBattle = new Map<string, string>();
   private nextBattleId = 1;
+  private readonly random: () => number;
+  private readonly combatAllowedCheck: (() => boolean) | null;
+
+  constructor(options: BattleManagerOptions = {}) {
+    this.random = options.random ?? Math.random;
+    this.combatAllowedCheck = options.combatAllowedCheck ?? null;
+  }
 
   isInBattle(agentId: string): boolean {
     return this.agentToBattle.has(agentId);
@@ -69,6 +88,9 @@ export class BattleManager {
     powers?: { attacker?: number; defender?: number },
     timestamp = Date.now(),
   ): { ok: true; battle: BattleStateSummary; events: BattleMessage[] } | { ok: false; error: string } {
+    if (this.combatAllowedCheck && !this.combatAllowedCheck()) {
+      return { ok: false, error: "Combat is currently disabled for this phase" };
+    }
     if (attackerId === defenderId) {
       return { ok: false, error: "Cannot start battle with yourself" };
     }
@@ -111,7 +133,10 @@ export class BattleManager {
       power,
       stamina,
       intents: {},
-      prevIntents: {},
+      intentStreak: {
+        [attackerId]: { intent: null, count: 0 },
+        [defenderId]: { intent: null, count: 0 },
+      },
       turn: 1,
       startedAt: timestamp,
       updatedAt: timestamp,
@@ -357,24 +382,46 @@ export class BattleManager {
       }
     }
 
-    // --- Momentum read bonus: +5 if opponent repeated their previous intent ---
-    const readBonusA = (battle.prevIntents[b] != null && battle.prevIntents[b] === intentB) ? MOMENTUM_READ_BONUS : 0;
-    const readBonusB = (battle.prevIntents[a] != null && battle.prevIntents[a] === intentA) ? MOMENTUM_READ_BONUS : 0;
+    // Readability penalty applies once an opponent has repeated the same intent 3x and keeps repeating.
+    const readBonusA =
+      battle.intentStreak[b].count >= MOMENTUM_REPEAT_THRESHOLD &&
+        battle.intentStreak[b].intent === intentB
+        ? MOMENTUM_READ_BONUS
+        : 0;
+    const readBonusB =
+      battle.intentStreak[a].count >= MOMENTUM_REPEAT_THRESHOLD &&
+        battle.intentStreak[a].intent === intentA
+        ? MOMENTUM_READ_BONUS
+        : 0;
 
     // --- Damage computation ---
     const baseDmgToB = this.computeDamage(intentA, intentB, battle.power[a]);
     const baseDmgToA = this.computeDamage(intentB, intentA, battle.power[b]);
 
     // Read bonus only applies when there's base damage to amplify
-    const damageToB = baseDmgToB > 0 ? baseDmgToB + readBonusA : 0;
-    const damageToA = baseDmgToA > 0 ? baseDmgToA + readBonusB : 0;
+    let damageToB = baseDmgToB > 0 ? baseDmgToB + readBonusA : 0;
+    let damageToA = baseDmgToA > 0 ? baseDmgToA + readBonusB : 0;
+
+    const hpBeforeA = battle.hp[a];
+    const hpBeforeB = battle.hp[b];
+    const critAttackers: string[] = [];
+
+    if (this.rollCriticalHit(intentA, hpBeforeB, damageToB)) {
+      damageToB *= 2;
+      critAttackers.push(a);
+    }
+    if (this.rollCriticalHit(intentB, hpBeforeA, damageToA)) {
+      damageToA *= 2;
+      critAttackers.push(b);
+    }
 
     battle.hp[a] = Math.max(0, battle.hp[a] - damageToA);
     battle.hp[b] = Math.max(0, battle.hp[b] - damageToB);
     battle.updatedAt = timestamp;
 
-    // Store intents for next turn's momentum check
-    battle.prevIntents = { [a]: intentA, [b]: intentB };
+    // Update streaks for next turn's readability checks.
+    this.updateIntentStreak(battle, a, intentA);
+    this.updateIntentStreak(battle, b, intentB);
 
     const readBonus: Record<string, number> = {};
     if (readBonusA > 0) readBonus[a] = readBonusA;
@@ -383,8 +430,10 @@ export class BattleManager {
     const roundSummary =
       `Turn ${turn}: ${a}(${intentA}) -> ${damageToB} dmg` +
       (readBonusA > 0 ? ` (+${readBonusA} read)` : "") +
+      (critAttackers.includes(a) ? " (CRIT)" : "") +
       `, ${b}(${intentB}) -> ${damageToA} dmg` +
       (readBonusB > 0 ? ` (+${readBonusB} read)` : "") +
+      (critAttackers.includes(b) ? " (CRIT)" : "") +
       `. HP ${a}:${battle.hp[a]} ${b}:${battle.hp[b]}` +
       ` | STA ${a}:${battle.stamina[a]} ${b}:${battle.stamina[b]}`;
 
@@ -400,6 +449,7 @@ export class BattleManager {
       damage: { [a]: damageToA, [b]: damageToB },
       intents: { [a]: intentA, [b]: intentB },
       readBonus: Object.keys(readBonus).length > 0 ? readBonus : undefined,
+      criticalHits: critAttackers.length > 0 ? critAttackers : undefined,
       summary: roundSummary,
       timestamp,
     };
@@ -533,6 +583,24 @@ export class BattleManager {
     }
     if (base <= 0) return 0;
     return Math.max(1, Math.round(base * attackerPower));
+  }
+
+  private updateIntentStreak(battle: ActiveBattle, agentId: string, intent: BattleIntent): void {
+    const current = battle.intentStreak[agentId] ?? { intent: null, count: 0 };
+    if (current.intent === intent) {
+      current.count += 1;
+    } else {
+      current.intent = intent;
+      current.count = 1;
+    }
+    battle.intentStreak[agentId] = current;
+  }
+
+  private rollCriticalHit(attackerIntent: BattleIntent, defenderHpBeforeTurn: number, damage: number): boolean {
+    if (attackerIntent !== "strike") return false;
+    if (defenderHpBeforeTurn >= 30) return false;
+    if (damage <= 0) return false;
+    return this.random() < CRIT_CHANCE;
   }
 
   private normalizePower(power: number | undefined): number {

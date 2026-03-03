@@ -112,6 +112,18 @@ export class WorldState {
           this.registry.touch(agentId);
         }
         break;
+
+      case "alliance":
+      case "bet":
+      case "territory":
+      case "zone_damage":
+      case "whisper":
+        this.registry.touch(msg.agentId);
+        break;
+
+      case "phase":
+        // Phase messages are system-level and do not map to a specific player profile.
+        break;
     }
   }
 

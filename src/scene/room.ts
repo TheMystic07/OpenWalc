@@ -16,11 +16,13 @@ export function createScene() {
 
   // ── CSS2D label renderer ───────────────────────────────────
   const labelRenderer = new CSS2DRenderer();
+  labelRenderer.sortObjects = true;
   labelRenderer.setSize(window.innerWidth, window.innerHeight);
   labelRenderer.domElement.style.position = "absolute";
   labelRenderer.domElement.style.top = "0";
   labelRenderer.domElement.style.left = "0";
   labelRenderer.domElement.style.pointerEvents = "none";
+  labelRenderer.domElement.style.contain = "layout style paint";
   document.getElementById("app")!.appendChild(labelRenderer.domElement);
 
   // ── Scene ──────────────────────────────────────────────────

@@ -4,6 +4,7 @@ import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 
 // ── Paths ────────────────────────────────────────────────────────────
 const MODEL_PATH = "/Models/lobsterDownloaded.gltf";
+const LOBSTER_MODEL_SCALE = 0.031;
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -42,15 +43,11 @@ export const ACTION_TO_CLIP: Record<string, string> = {
   stunned: "Hit",
   victory: "Bounce",
   defeated: "Death",
-  combatReady: "Idle_B",
+  combatReady: "Idle_A",
 };
 
-export const IDLE_VARIANTS: string[] = ["Idle_A", "Idle_B", "Idle_C"];
-
-/** Pick a random idle clip name. */
-export function randomIdleClip(): string {
-  return IDLE_VARIANTS[Math.floor(Math.random() * IDLE_VARIANTS.length)];
-}
+const ANIMATION_TIME_SCALE = 0.62;
+const DEFAULT_CROSSFADE_SECONDS = 0.45;
 
 // ── One-shot clips (play once and hold final frame) ──────────────────
 
@@ -135,7 +132,10 @@ function isBodyPixel(r: number, g: number, b: number): boolean {
  * are tinted to the agent's color, preserving luminance variation.
  */
 function getColorSwappedTexture(color: string): THREE.CanvasTexture {
-  const cached = colorTextureCache.get(color);
+  const targetColor = new THREE.Color(color);
+  const cacheKey = color.toLowerCase();
+
+  const cached = colorTextureCache.get(cacheKey);
   if (cached) return cached;
 
   ensureBaseTexture();
@@ -154,18 +154,16 @@ function getColorSwappedTexture(color: string): THREE.CanvasTexture {
   const imageData = ctx.getImageData(0, 0, w, h);
   const data = imageData.data;
 
-  const target = new THREE.Color(color);
-  const tR = target.r * 255;
-  const tG = target.g * 255;
-  const tB = target.b * 255;
+  const tR = targetColor.r * 255;
+  const tG = targetColor.g * 255;
+  const tB = targetColor.b * 255;
 
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
     if (isBodyPixel(r, g, b)) {
-      // Luminance of original pixel as a brightness multiplier
+      // Preserve original shading while tinting toward target color.
       const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
-      // Scale by ~1.3 so the target color doesn't get too dark
-      const scale = Math.min(lum * 1.3, 1);
+      const scale = Math.min(lum * 1.24, 0.98);
       data[i]     = Math.min(255, Math.round(tR * scale));
       data[i + 1] = Math.min(255, Math.round(tG * scale));
       data[i + 2] = Math.min(255, Math.round(tB * scale));
@@ -177,7 +175,7 @@ function getColorSwappedTexture(color: string): THREE.CanvasTexture {
   const tex = new THREE.CanvasTexture(canvas);
   tex.flipY = false;
   tex.colorSpace = THREE.SRGBColorSpace;
-  colorTextureCache.set(color, tex);
+  colorTextureCache.set(cacheKey, tex);
   return tex;
 }
 
@@ -197,21 +195,21 @@ export function createLobsterInstance(color: string): LobsterInstance {
   // Clone with skeleton awareness so bone bindings remain correct
   const cloned = SkeletonUtils.clone(cachedScene) as THREE.Group;
   cloned.name = "lobster";
-  cloned.scale.setScalar(0.025);
+  cloned.scale.setScalar(LOBSTER_MODEL_SCALE);
 
   // Color-swapped texture for this agent
   const swappedTex = getColorSwappedTexture(color);
 
-  // Collect materials — unlit MeshBasicMaterial with swapped texture
+  // Collect materials (unlit texture look, like before brightness/emission tweaks).
   const materials: THREE.Material[] = [];
 
   cloned.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return;
     child.castShadow = true;
 
-    const basicMat = new THREE.MeshBasicMaterial({ map: swappedTex });
-    materials.push(basicMat);
-    child.material = basicMat;
+    const mat = new THREE.MeshBasicMaterial({ map: swappedTex });
+    materials.push(mat);
+    child.material = mat;
   });
 
   // AnimationMixer + pre-create all actions
@@ -220,6 +218,7 @@ export function createLobsterInstance(color: string): LobsterInstance {
 
   for (const clip of cachedClips) {
     const action = mixer.clipAction(clip);
+    action.setEffectiveTimeScale(ANIMATION_TIME_SCALE);
 
     if (ONE_SHOT_CLIPS.has(clip.name)) {
       action.setLoop(THREE.LoopOnce, 1);
@@ -234,6 +233,7 @@ export function createLobsterInstance(color: string): LobsterInstance {
   // Start with Idle_A playing
   const idleAction = actions.get("Idle_A");
   if (idleAction) {
+    idleAction.setEffectiveTimeScale(ANIMATION_TIME_SCALE);
     idleAction.play();
   }
 
@@ -248,12 +248,12 @@ export function createLobsterInstance(color: string): LobsterInstance {
  *
  * @param instance  The lobster instance to animate
  * @param clipName  Target GLTF animation clip name (e.g. "Walk", "Attack")
- * @param duration  Crossfade duration in seconds (default 0.2)
+ * @param duration  Crossfade duration in seconds (default 0.45)
  */
 export function crossfadeTo(
   instance: LobsterInstance,
   clipName: string,
-  duration = 0.2,
+  duration = DEFAULT_CROSSFADE_SECONDS,
 ): void {
   const target = instance.actions.get(clipName);
   if (!target) return;
@@ -272,7 +272,7 @@ export function crossfadeTo(
 
   // Reset the target in case it was a completed one-shot
   target.reset();
-  target.setEffectiveTimeScale(1);
+  target.setEffectiveTimeScale(ANIMATION_TIME_SCALE);
   target.setEffectiveWeight(1);
 
   if (current) {

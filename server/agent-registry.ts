@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { AgentCombatState, AgentProfile } from "./types.js";
+import { getThreatLevel, type AgentCombatState, type AgentProfile } from "./types.js";
 
 const PROFILES_PATH = resolve(process.cwd(), "profiles.json");
 
@@ -26,6 +26,7 @@ export class AgentRegistry {
       : existing?.combat
         ? { ...this.normalizeCombat(existing.combat) }
         : undefined;
+    const inferredThreat = getThreatLevel(mergedCombat?.kills ?? 0);
 
     const merged: AgentProfile = {
       agentId: profile.agentId,
@@ -36,6 +37,10 @@ export class AgentRegistry {
       capabilities: profile.capabilities ?? existing?.capabilities ?? [],
       skills: profile.skills ?? existing?.skills,
       combat: mergedCombat,
+      reputation: this.normalizeReputation(profile.reputation ?? existing?.reputation),
+      threatLevel: this.normalizeThreatLevel(
+        profile.threatLevel ?? (mergedCombat ? inferredThreat : existing?.threatLevel),
+      ),
       color: profile.color ?? existing?.color ?? this.randomColor(),
       avatar: profile.avatar ?? existing?.avatar,
       joinedAt: existing?.joinedAt ?? now,
@@ -125,6 +130,7 @@ export class AgentRegistry {
     combat.wins += 1;
     combat.guilt += Math.max(0, guiltDelta);
     profile.combat = combat;
+    profile.threatLevel = getThreatLevel(combat.kills);
     profile.lastSeen = Date.now();
 
     this.scheduleSave();
@@ -161,6 +167,7 @@ export class AgentRegistry {
       refusedPrize: false,
       permanentlyDead: false,
     };
+    profile.threatLevel = 1;
     profile.lastSeen = Date.now();
 
     this.scheduleSave();
@@ -174,9 +181,12 @@ export class AgentRegistry {
   }
 
   private randomColor(): string {
+    // Mix current saturated tones with slightly brighter variants.
     const colors = [
       "#e74c3c", "#e67e22", "#f39c12", "#2ecc71",
       "#1abc9c", "#3498db", "#9b59b6", "#e91e63",
+      "#f06d60", "#ee9a4c", "#f6b13f", "#53d88d",
+      "#40c9b0", "#5fafe6", "#b27ac7", "#ee4c84",
     ];
     return colors[Math.floor(Math.random() * colors.length)];
   }
@@ -187,7 +197,30 @@ export class AgentRegistry {
         const data = JSON.parse(readFileSync(PROFILES_PATH, "utf-8"));
         if (Array.isArray(data)) {
           for (const p of data) {
-            if (p.agentId) this.profiles.set(p.agentId, p);
+            if (!p?.agentId) continue;
+            const combat = p.combat
+              ? this.normalizeCombat(p.combat as Partial<AgentCombatState>)
+              : undefined;
+            const threatFromKills = getThreatLevel(combat?.kills ?? 0);
+            const normalized: AgentProfile = {
+              agentId: String(p.agentId),
+              name: typeof p.name === "string" ? p.name : String(p.agentId),
+              walletAddress: typeof p.walletAddress === "string" ? p.walletAddress : "",
+              pubkey: typeof p.pubkey === "string" ? p.pubkey : "",
+              bio: typeof p.bio === "string" ? p.bio : "",
+              capabilities: Array.isArray(p.capabilities)
+                ? p.capabilities.filter((capability: unknown): capability is string => typeof capability === "string")
+                : [],
+              skills: Array.isArray(p.skills) ? p.skills : undefined,
+              combat,
+              reputation: this.normalizeReputation(p.reputation),
+              threatLevel: this.normalizeThreatLevel(p.threatLevel ?? threatFromKills),
+              color: typeof p.color === "string" ? p.color : this.randomColor(),
+              avatar: typeof p.avatar === "string" ? p.avatar : undefined,
+              joinedAt: Number(p.joinedAt) || Date.now(),
+              lastSeen: Number(p.lastSeen) || Date.now(),
+            };
+            this.profiles.set(normalized.agentId, normalized);
           }
         }
       }
@@ -209,6 +242,18 @@ export class AgentRegistry {
       lastDeathAt: combat?.lastDeathAt,
       deadUntil: combat?.deadUntil,
     };
+  }
+
+  private normalizeReputation(value: unknown): number {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 5;
+    return Math.max(0, Math.min(10, num));
+  }
+
+  private normalizeThreatLevel(value: unknown): number {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return 1;
+    return Math.max(1, Math.min(5, Math.round(num)));
   }
 
   /** Schedule a debounced save — coalesces rapid mutations into one write */

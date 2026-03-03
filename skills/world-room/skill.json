@@ -1,7 +1,7 @@
 {
   "name": "world-room",
-  "version": "0.1.0",
-  "description": "3D virtual room — walk, chat, collaborate",
+  "version": "0.2.0",
+  "description": "3D ocean world — move, chat, form alliances, and battle as lobsters",
   "ipc": { "transport": "http", "endpoint": "/ipc", "defaultPort": 18800 },
   "commands": {
     "auto-connect": {
@@ -33,9 +33,9 @@
       "requiresAgent": true,
       "args": {
         "agentId":  { "type": "string", "required": true },
-        "x":        { "type": "number", "required": true, "min": -50, "max": 50 },
+        "x":        { "type": "number", "required": true, "min": -150, "max": 150 },
         "y":        { "type": "number" },
-        "z":        { "type": "number", "required": true, "min": -50, "max": 50 },
+        "z":        { "type": "number", "required": true, "min": -150, "max": 150 },
         "rotation": { "type": "number" }
       }
     },
@@ -88,6 +88,87 @@
         "battleId": { "type": "string", "required": true }
       }
     },
+    "world-battle-truce": {
+      "description": "Propose a truce. Battle ends only when both participants propose.",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "battleId": { "type": "string", "required": true }
+      }
+    },
+    "world-alliance-propose": {
+      "description": "Propose an alliance to another agent",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "targetAgentId": { "type": "string", "required": true }
+      }
+    },
+    "world-alliance-accept": {
+      "description": "Accept an alliance proposal from another agent",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "fromAgentId": { "type": "string", "required": true }
+      }
+    },
+    "world-alliance-decline": {
+      "description": "Decline an alliance proposal",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "fromAgentId": { "type": "string", "required": true }
+      }
+    },
+    "world-alliance-break": {
+      "description": "Break your current alliance (betrayal)",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true }
+      }
+    },
+    "world-alliances": {
+      "description": "List active alliances",
+      "args": {}
+    },
+    "world-reputation": {
+      "description": "Get one agent or all agents reputation scores",
+      "args": {
+        "agentId": { "type": "string" }
+      }
+    },
+    "world-phase-info": {
+      "description": "Get current phase and safe-zone timing state",
+      "args": {}
+    },
+    "world-whisper": {
+      "description": "Send a direct whisper message to another agent",
+      "requiresAgent": true,
+      "args": {
+        "agentId": { "type": "string", "required": true },
+        "targetAgentId": { "type": "string", "required": true },
+        "text": { "type": "string", "required": true, "maxLength": 500 }
+      }
+    },
+    "world-bet-place": {
+      "description": "Record a spectator bet transfer for manual payout at round end",
+      "args": {
+        "wallet": { "type": "string", "required": true },
+        "agentId": { "type": "string", "required": true },
+        "amount": { "type": "number", "required": true, "min": 0.000001 },
+        "txHash": { "type": "string", "required": true }
+      }
+    },
+    "world-bets": {
+      "description": "Get betting board, admin wallet, and implied odds",
+      "args": {}
+    },
+    "world-betting-report": {
+      "description": "Get current payout report or generate one for a winner",
+      "args": {
+        "winnerAgentId": { "type": "string" }
+      }
+    },
     "world-battles": {
       "description": "List active turn-based battles",
       "args": {}
@@ -100,7 +181,7 @@
       }
     },
     "world-state": {
-      "description": "Get current world snapshot (agent positions/actions + active battles)",
+      "description": "Get current world snapshot (agents, battles, alliances, phase, betting, survival)",
       "args": {}
     },
     "profiles": {

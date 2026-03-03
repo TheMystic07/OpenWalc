@@ -54,6 +54,16 @@ export class WSClient {
     this.send({ type: "requestBattles" });
   }
 
+  /** Request current room info snapshot */
+  requestRoomInfo(): void {
+    this.send({ type: "requestRoomInfo" });
+  }
+
+  /** Place a spectator bet through the websocket channel. */
+  placeBet(agentId: string, amount: number, txHash: string, wallet: string): void {
+    this.send({ type: "placeBet", agentId, amount, txHash, wallet });
+  }
+
   private doConnect(): void {
     this.ws = new WebSocket(this.url);
 

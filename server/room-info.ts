@@ -1,5 +1,5 @@
 import type { RoomConfig } from "./room-config.js";
-import type { SurvivalContractState } from "./types.js";
+import type { PhaseState, SurvivalContractState } from "./types.js";
 
 export interface RoomInfo {
   roomId: string;
@@ -9,6 +9,7 @@ export interface RoomInfo {
   maxAgents: number;
   nostrChannelId: string | null;
   survival: SurvivalContractState;
+  phase: PhaseState;
 }
 
 export function createRoomInfoGetter(
@@ -16,6 +17,7 @@ export function createRoomInfoGetter(
   getAgentCount: () => number,
   getChannelId: () => string | null,
   getSurvival: () => SurvivalContractState,
+  getPhase: () => PhaseState,
 ): () => RoomInfo {
   return () => ({
     roomId: config.roomId,
@@ -25,5 +27,6 @@ export function createRoomInfoGetter(
     maxAgents: config.maxAgents,
     nostrChannelId: getChannelId(),
     survival: getSurvival(),
+    phase: getPhase(),
   });
 }

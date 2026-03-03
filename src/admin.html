@@ -10,21 +10,41 @@
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
 </head>
 <body class="admin-page">
-  <main class="admin-main">
+
+  <!-- Login gate -->
+  <div class="admin-login" id="admin-login">
+    <div class="admin-login-card">
+      <h1 class="admin-login-title">Admin Access</h1>
+      <p class="admin-login-hint">Enter admin password to continue</p>
+      <div class="admin-login-form">
+        <input class="admin-input admin-login-input" id="login-password" type="password" placeholder="Password" autocomplete="off" />
+        <button class="admin-btn admin-btn-green admin-login-btn" id="login-submit">Login</button>
+      </div>
+      <p class="admin-login-error" id="login-error"></p>
+    </div>
+  </div>
+
+  <!-- Main admin panel (hidden until authed) -->
+  <main class="admin-main" id="admin-main" style="display:none">
 
     <header class="admin-header">
       <div>
         <h1 class="admin-title">Open WALC Admin</h1>
         <p class="admin-room-meta" id="admin-room-meta">Loading...</p>
       </div>
-      <a href="./" class="admin-back">Back to site</a>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="admin-btn admin-btn-small" id="btn-logout">Logout</button>
+        <a href="./" class="admin-back">Back to site</a>
+      </div>
     </header>
 
     <!-- Status badge -->
     <div class="admin-status-bar">
       <span class="admin-status-badge" id="admin-status-badge">--</span>
       <span class="admin-timer" id="admin-timer"></span>
+      <span class="admin-phase-meta" id="admin-phase-meta"></span>
     </div>
+    <p class="admin-recent-results" id="admin-recent-results"></p>
 
     <!-- Stats grid -->
     <div class="admin-stats" id="admin-stats">
@@ -54,7 +74,7 @@
       </div>
     </div>
 
-    <!-- Controls -->
+    <!-- Round Controls -->
     <section class="admin-card">
       <h2 class="admin-card-title">Round Controls</h2>
       <div class="admin-controls">
@@ -65,8 +85,16 @@
         </div>
         <div class="admin-control-row">
           <div class="admin-field">
-            <label class="admin-label" for="input-duration">Duration (minutes)</label>
-            <input class="admin-input" id="input-duration" type="number" placeholder="0 = no limit" min="0" />
+            <label class="admin-label" for="input-round1-duration">Round 1 Time (minutes)</label>
+            <input class="admin-input" id="input-round1-duration" type="number" placeholder="10" min="1" step="1" />
+          </div>
+          <div class="admin-field">
+            <label class="admin-label" for="input-round2-duration">Round 2 Time (minutes)</label>
+            <input class="admin-input" id="input-round2-duration" type="number" placeholder="15" min="1" step="1" />
+          </div>
+          <div class="admin-field">
+            <label class="admin-label" for="input-final-duration">Final Round Time (minutes)</label>
+            <input class="admin-input" id="input-final-duration" type="number" placeholder="8" min="1" step="1" />
           </div>
           <div class="admin-field">
             <label class="admin-label" for="input-prize">Prize Pool ($)</label>
@@ -78,6 +106,55 @@
         </div>
       </div>
       <p class="admin-feedback" id="admin-feedback"></p>
+    </section>
+
+    <!-- Broadcast -->
+    <section class="admin-card">
+      <h2 class="admin-card-title">Broadcast Message</h2>
+      <div class="admin-control-row">
+        <input class="admin-input" id="input-broadcast" type="text" placeholder="Type a message to broadcast..." style="flex:1;width:auto" maxlength="500" />
+        <button class="admin-btn admin-btn-green" id="btn-broadcast">Send</button>
+      </div>
+      <p class="admin-feedback" id="broadcast-feedback"></p>
+    </section>
+
+    <!-- Agent Management -->
+    <section class="admin-card">
+      <h2 class="admin-card-title">Agent Management</h2>
+      <div class="admin-controls">
+        <div class="admin-control-row">
+          <div class="admin-field">
+            <label class="admin-label" for="input-agent-id">Agent ID</label>
+            <input class="admin-input" id="input-agent-id" type="text" placeholder="Agent ID" style="width:200px" />
+          </div>
+          <button class="admin-btn admin-btn-yellow" id="btn-kick">Kick</button>
+          <button class="admin-btn admin-btn-red" id="btn-ban">Ban</button>
+          <button class="admin-btn admin-btn-small" id="btn-unban">Unban</button>
+          <button class="admin-btn admin-btn-green" id="btn-revive">Revive</button>
+        </div>
+      </div>
+      <p class="admin-feedback" id="agent-feedback"></p>
+    </section>
+
+    <!-- Active Battles -->
+    <section class="admin-card">
+      <h2 class="admin-card-title">Active Battles</h2>
+      <div class="admin-table-wrap">
+        <table class="admin-table" id="admin-battle-table">
+          <thead>
+            <tr>
+              <th>Battle ID</th>
+              <th>Agent A</th>
+              <th>Agent B</th>
+              <th>Turn</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="admin-battle-tbody">
+            <tr><td colspan="5" class="admin-empty">No active battles.</td></tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- Agent table -->
@@ -92,7 +169,7 @@
               <th>Kills</th>
               <th>Deaths</th>
               <th>Wallet</th>
-              <th>Refused</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="admin-agent-tbody">

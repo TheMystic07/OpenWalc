@@ -1,0 +1,260 @@
+{
+  "version": 1,
+  "skills": {
+    "3d-visualizer": {
+      "source": "daffy0208/ai-dev-standards",
+      "sourceType": "github",
+      "computedHash": "537377453af25180f60838621fd5edb3773794193469b64988196e19b524ea9d"
+    },
+    "accessibility": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "github",
+      "computedHash": "3f390c14d09ca45da332b6c421b3195d12da099ec24ee549f80e666ec48dc89b"
+    },
+    "animation-designer": {
+      "source": "daffy0208/ai-dev-standards",
+      "sourceType": "github",
+      "computedHash": "8d67411378f8609415a2ea727013490c8432bfd941ae3f4a343b8bf4d874ec81"
+    },
+    "api-design": {
+      "source": "affaan-m/everything-claude-code",
+      "sourceType": "github",
+      "computedHash": "cd8dad9f9cf4eae8632a3969cd12f4e9ad1f9d58a9ed607c2d9ce51876d6dd13"
+    },
+    "best-practices": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "github",
+      "computedHash": "f5d58f0adf9cc9646b35daf2241377e1ad7b8ab094e54c9792a826af1e0dca5b"
+    },
+    "code-refactoring": {
+      "source": "supercent-io/skills-template",
+      "sourceType": "github",
+      "computedHash": "65079112f3cd1e2cc897390d78dd7185333d61b15b68b754bedddfddcdf6d857"
+    },
+    "core-web-vitals": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "github",
+      "computedHash": "466ba01941037ddc0b519273035eae1e1f591019bdeb0fd83cd8786c53a07f89"
+    },
+    "create-github-action-workflow-specification": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "computedHash": "527e6c77d921d58a9d0059aa95d0d14b441d2166f9c20518263048a56ca8fbbb"
+    },
+    "css-native": {
+      "source": "dylantarre/animation-principles",
+      "sourceType": "github",
+      "computedHash": "3864116dd63afea5366763ee06068f088b316961966bca3ff8733568b63904dd"
+    },
+    "deliberate-1200-2000ms": {
+      "source": "dylantarre/animation-principles",
+      "sourceType": "github",
+      "computedHash": "40e00550b9f81dc6b183cefa92041a3b9959d40528ce3b9f8ad7e88f3af5e2f4"
+    },
+    "design-md": {
+      "source": "C:\\Users\\gursh\\AppData\\Local\\Temp\\stitch-skills",
+      "sourceType": "local",
+      "computedHash": "44af3e6e89a42a765d9cebf943f1e2ff3cdf43d1958341eb43fb7b74116f6691"
+    },
+    "dramatic-2000ms-plus": {
+      "source": "dylantarre/animation-principles",
+      "sourceType": "github",
+      "computedHash": "116374d13ff91b9cf85bff4993e9a04e2f3f32756a87855eaeaf93d83cc56254"
+    },
+    "enhance-prompt": {
+      "source": "C:\\Users\\gursh\\AppData\\Local\\Temp\\stitch-skills",
+      "sourceType": "local",
+      "computedHash": "28c47bcbc0e8d81f48fbbbe41d227efe4018a32c5d4674b0d052a70d215072d3"
+    },
+    "frontend-design": {
+      "source": "vudovn/antigravity-kit",
+      "sourceType": "github",
+      "computedHash": "b1a2c3948dcb2e4ac3b1cff3a0586632600a350db192b9632b67cef3ff1f9a61"
+    },
+    "frontend-security": {
+      "source": "schalkneethling/webdev-agent-skills",
+      "sourceType": "github",
+      "computedHash": "e8d405042bb53c7b1a87523b01a6e7d219c31627679a4e92f8b32abbde4cbbc9"
+    },
+    "frontend-ui": {
+      "source": "scientiacapital/skills",
+      "sourceType": "github",
+      "computedHash": "9801acc9a07c10cba23a43b863bcd8d5991148c7084498a1ea2bc03735b7f301"
+    },
+    "game-networking": {
+      "source": "omer-metin/skills-for-antigravity",
+      "sourceType": "github",
+      "computedHash": "1fd42a9589471f5387bb3f56665447f51f3e381a34be7e0ed50d8ce09d7a37f6"
+    },
+    "git-advanced-workflows": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "96274c5eff703074436e1e4ab1f388117f3d79fdc0e6df8fec9ae00c70f47d73"
+    },
+    "glsl": {
+      "source": "martinholovsky/claude-skills-generator",
+      "sourceType": "github",
+      "computedHash": "cedae4c1c1a4bacec41de8be5bdb126c50fd4fc09148b955d9b5a810639811b0"
+    },
+    "multiplayer-game": {
+      "source": "rivet-dev/skills",
+      "sourceType": "github",
+      "computedHash": "37d207cf4f8414a477744cc2b35cd66d88eab3f9b8ff8936c1573bf42d140bfe"
+    },
+    "nak": {
+      "source": "soapbox-pub/nostr-skills",
+      "sourceType": "github",
+      "computedHash": "f635499c98aa19d00b8e57e73782abd1f7cd64a53a79776aa40aa1efc7bd7150"
+    },
+    "nostr": {
+      "source": "soapbox-pub/nostr-skills",
+      "sourceType": "github",
+      "computedHash": "7c3ee95a7be918a4c77121da3721b7a07f154475167d29423837e97c87047286"
+    },
+    "performance": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "github",
+      "computedHash": "9e0e29b7919bacfd2d0caae0f841fa53ae3d7b7427d27f4fdbacc76643d7d138"
+    },
+    "performance-optimization": {
+      "source": "supercent-io/skills-template",
+      "sourceType": "github",
+      "computedHash": "7f787b3497f82e6b800580efb4709ed0a6cff76e21f91bd218efb957b6ccd698"
+    },
+    "react-doctor": {
+      "source": "millionco/react-doctor",
+      "sourceType": "github",
+      "computedHash": "276053f3861a6f29e2ab1922fc91281934dac5be78f85ec9f21604fd979383ee"
+    },
+    "react-native-r3f": {
+      "source": "mindrally/skills",
+      "sourceType": "github",
+      "computedHash": "d97bf027edf0cc02dca24030f0b8a7daa3cda0a30efffb388f9b95cd0f0e3f0c"
+    },
+    "react-three-fiber": {
+      "source": "freshtechbro/claudedesignskills",
+      "sourceType": "github",
+      "computedHash": "b118f1385a1ec24604a70a4798e0fb5534b1f09ac8d96f019706ff3902bcb5fa"
+    },
+    "react:components": {
+      "source": "C:\\Users\\gursh\\AppData\\Local\\Temp\\stitch-skills",
+      "sourceType": "local",
+      "computedHash": "0c5e494ae2092c57a893874e6d288de3706a224385c7d26dc4769d9db3aaaa12"
+    },
+    "real-time-features": {
+      "source": "aj-geddes/useful-ai-prompts",
+      "sourceType": "github",
+      "computedHash": "2ca91ff059c51db287d50c50c2d5640ca8cbe530b7341cdde9ee9478cd3389a8"
+    },
+    "remotion": {
+      "source": "C:\\Users\\gursh\\AppData\\Local\\Temp\\stitch-skills",
+      "sourceType": "local",
+      "computedHash": "b3c84d4942732bcd17b47de0a89f9561c460d718b81e0970521077e809d3b990"
+    },
+    "seo": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "github",
+      "computedHash": "680cc12a17e9308b4592a2751db51615c618993f75362cb8e64207f6355a8c63"
+    },
+    "shadcn-ui": {
+      "source": "C:\\Users\\gursh\\AppData\\Local\\Temp\\stitch-skills",
+      "sourceType": "local",
+      "computedHash": "119a14a004bd30fa99d386df599bd0db8d057cca146f7ee08349daed48b2ea55"
+    },
+    "shader-fundamentals": {
+      "source": "bbeierle12/skill-mcp-claude",
+      "sourceType": "github",
+      "computedHash": "6160494d2325f3252969c03da7a8f02ea34a36229b84cc94221e15321909b59a"
+    },
+    "shader-programming": {
+      "source": "omer-metin/skills-for-antigravity",
+      "sourceType": "github",
+      "computedHash": "8246a3ddc037f9f65a1a1c040e18db8a98706a859675696408230df742ce4f06"
+    },
+    "shadertoy": {
+      "source": "bfollington/terma",
+      "sourceType": "github",
+      "computedHash": "e6d9f024b6211b5bf54bc63d81f9b4f4314887ef888216a46ad2fa4edfa405a1"
+    },
+    "software-crypto-web3": {
+      "source": "vasilyu1983/ai-agents-public",
+      "sourceType": "github",
+      "computedHash": "63e9621b87f28f987a0118fecc4295d7371273af41e8b6cdabc314bbe71d5128"
+    },
+    "solana-kit": {
+      "source": "sendaifun/skills",
+      "sourceType": "github",
+      "computedHash": "03dfe9ce0cbecda78445798f80dd25391f90f0a2379275117e83ba9ff8a766bb"
+    },
+    "stitch-loop": {
+      "source": "C:\\Users\\gursh\\AppData\\Local\\Temp\\stitch-skills",
+      "sourceType": "local",
+      "computedHash": "0199f82746e181b8a40b5638351a16ae8335390b5de4018d2d45aa648f6bf952"
+    },
+    "tailwind-css-patterns": {
+      "source": "giuseppe-trisciuoglio/developer-kit",
+      "sourceType": "github",
+      "computedHash": "1539970dbed5bb860c92ea1ef4ec10210f926d7f4df6fad4125c2cfb93fc6f8b"
+    },
+    "tailwind-design-system": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "c88178d861802fa836be54e377e82bb67899b6c378807679a1feecd21bf63cb8"
+    },
+    "tailwindcss-advanced-layouts": {
+      "source": "josiahsiegel/claude-plugin-marketplace",
+      "sourceType": "github",
+      "computedHash": "bf3eb96bcdcceb54cf2c0ba01daa18275c169627f37f5a861490c78e8055a5ce"
+    },
+    "three-best-practices": {
+      "source": "emalorenzo/three-agent-skills",
+      "sourceType": "github",
+      "computedHash": "f1d2981c4a865dd90d7fbd4e43df4570a0275cae3fde51199e03b2c8a20a4776"
+    },
+    "threejs-scene-builder": {
+      "source": "dexploarer/hyper-forge",
+      "sourceType": "github",
+      "computedHash": "999b091631a6704ea7bfc69980892194019d8f4071c9b0174e3581a8af00b0ea"
+    },
+    "typescript-best-practices": {
+      "source": "0xbigboss/claude-code",
+      "sourceType": "github",
+      "computedHash": "b85adad2caf537bb27fa82910cfc356a2176897cda4ae3fcb1d2b021798e1415"
+    },
+    "ui-animation": {
+      "source": "travisjneuman/.claude",
+      "sourceType": "github",
+      "computedHash": "45ce158e8470d033ee0845310d8e5efb42609c936437931aad3bba6789d770b1"
+    },
+    "vercel-react-best-practices": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "github",
+      "computedHash": "61f8c307aa8ce0c4c52da8886d42e344dab83f76f9b5360cf8923b25fb1d67bb"
+    },
+    "vite": {
+      "source": "antfu/skills",
+      "sourceType": "github",
+      "computedHash": "f406fceb1b9020cd759a728d8424de7ffd8dfe5874bd97be2724571741e54852"
+    },
+    "web-design-mastery": {
+      "source": "anilcancakir/my-claude-code",
+      "sourceType": "github",
+      "computedHash": "668f17f24d17de1a5871cb8c7c4f1f491f157fa39b1792532df9b251dff6a5ba"
+    },
+    "web-quality-audit": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "github",
+      "computedHash": "04aeec0ff9071fc9cfb5b848a25946f8ca8586c842e50da4c1abbba8ceeaec40"
+    },
+    "web-wave-designer": {
+      "source": "erichowens/some_claude_skills",
+      "sourceType": "github",
+      "computedHash": "8586265bc68e6be7607e7d49ea8ac645f20186db176e4debff77255ae2b92bbc"
+    },
+    "websocket-implementation": {
+      "source": "aj-geddes/useful-ai-prompts",
+      "sourceType": "github",
+      "computedHash": "f11296ff2805967dd52f3992a2bcab7087cebbd98180c52585087c9dcd2d9407"
+    }
+  }
+}

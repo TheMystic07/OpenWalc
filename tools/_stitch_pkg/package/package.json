@@ -1,0 +1,38 @@
+{
+    "name": "stitch-mcp",
+    "version": "1.3.2",
+    "description": "Universal MCP server for Google Stitch - AI-powered UI/UX design tool. Works with Claude, Cursor, Antigravity, and any MCP-compatible AI.",
+    "main": "index.js",
+    "bin": {
+        "stitch-mcp": "./index.js"
+    },
+    "scripts": {
+        "start": "node index.js"
+    },
+    "keywords": [
+        "mcp",
+        "stitch",
+        "google",
+        "ai",
+        "ui",
+        "ux",
+        "design",
+        "figma",
+        "claude",
+        "cursor",
+        "model-context-protocol"
+    ],
+    "author": "Aakash Kargathara",
+    "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Kargatharaakash/stitch-mcp"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.0.0",
+        "node-fetch": "^2.7.0"
+    }
+}
