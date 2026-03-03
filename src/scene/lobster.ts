@@ -118,11 +118,20 @@ export function createLobsterInstance(_color: string): LobsterInstance {
     if (Array.isArray(child.material)) {
       child.material = child.material.map((m: THREE.Material) => {
         const clonedMat = m.clone();
+        // Ensure the lobster is well-lit: no metalness, moderate roughness
+        if (clonedMat instanceof THREE.MeshStandardMaterial) {
+          clonedMat.metalness = 0;
+          clonedMat.roughness = 0.8;
+        }
         materials.push(clonedMat);
         return clonedMat;
       });
     } else {
       const clonedMat = child.material.clone();
+      if (clonedMat instanceof THREE.MeshStandardMaterial) {
+        clonedMat.metalness = 0;
+        clonedMat.roughness = 0.8;
+      }
       materials.push(clonedMat);
       child.material = clonedMat;
     }
