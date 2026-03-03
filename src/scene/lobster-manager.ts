@@ -492,13 +492,15 @@ export class LobsterManager {
         entry.combatSparkTimer = 0;
       }
 
-      // Hit flash makes active exchanges readable at a glance.
+      // Hit flash — tint the MeshBasicMaterial color toward red on impact.
       const flash = entry.impactPulse;
       for (const mat of entry.instance.materials) {
-        if (!("emissive" in mat) || !("emissiveIntensity" in mat)) continue;
-        const emMat = mat as THREE.MeshStandardMaterial;
-        emMat.emissive.setHex(0xff6a4d);
-        emMat.emissiveIntensity = flash * 0.85;
+        if (!(mat instanceof THREE.MeshBasicMaterial)) continue;
+        if (flash > 0) {
+          mat.color.setHex(0xff6a4d).lerp(new THREE.Color(0xffffff), 1 - flash);
+        } else {
+          mat.color.setHex(0xffffff);
+        }
       }
 
       // ── Animation dispatch ──────────────────────────────────────────

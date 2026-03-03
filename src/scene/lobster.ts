@@ -115,26 +115,13 @@ export function createLobsterInstance(_color: string): LobsterInstance {
     if (!(child instanceof THREE.Mesh)) return;
     child.castShadow = true;
 
-    if (Array.isArray(child.material)) {
-      child.material = child.material.map((m: THREE.Material) => {
-        const clonedMat = m.clone();
-        // Ensure the lobster is well-lit: no metalness, moderate roughness
-        if (clonedMat instanceof THREE.MeshStandardMaterial) {
-          clonedMat.metalness = 0;
-          clonedMat.roughness = 0.8;
-        }
-        materials.push(clonedMat);
-        return clonedMat;
-      });
-    } else {
-      const clonedMat = child.material.clone();
-      if (clonedMat instanceof THREE.MeshStandardMaterial) {
-        clonedMat.metalness = 0;
-        clonedMat.roughness = 0.8;
-      }
-      materials.push(clonedMat);
-      child.material = clonedMat;
-    }
+    // Use MeshBasicMaterial (unlit) so the texture shows at full brightness
+    // like Blender's Material Preview — no scene lighting affects it.
+    const srcMat = Array.isArray(child.material) ? child.material[0] : child.material;
+    const tex = (srcMat as THREE.MeshStandardMaterial).map;
+    const basicMat = new THREE.MeshBasicMaterial({ map: tex });
+    materials.push(basicMat);
+    child.material = basicMat;
   });
 
   // AnimationMixer + pre-create all actions
