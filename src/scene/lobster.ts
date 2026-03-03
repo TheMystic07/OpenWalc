@@ -4,7 +4,6 @@ import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
 
 // ── Paths ────────────────────────────────────────────────────────────
 const MODEL_PATH = "/Models/lobsterDownloaded.gltf";
-const TEXTURE_PATH = "/Models/LobsterTexture.png";
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -69,8 +68,6 @@ const ONE_SHOT_CLIPS = new Set<string>([
 
 let cachedScene: THREE.Group | null = null;
 let cachedClips: THREE.AnimationClip[] = [];
-let cachedBaseTexture: HTMLImageElement | null = null;
-const hueTextureCache = new Map<number, THREE.CanvasTexture>();
 
 // ── Model loader ─────────────────────────────────────────────────────
 
@@ -82,26 +79,10 @@ export async function loadLobsterModel(): Promise<void> {
   if (cachedScene) return;
 
   const loader = new GLTFLoader();
-  const textureLoader = new THREE.TextureLoader();
-
-  const [gltf, baseTexture] = await Promise.all([
-    loader.loadAsync(MODEL_PATH),
-    new Promise<HTMLImageElement>((resolve, reject) => {
-      const tex = textureLoader.load(
-        TEXTURE_PATH,
-        (t) => resolve(t.image as HTMLImageElement),
-        undefined,
-        reject,
-      );
-      // We need the image element for canvas hue-shift; the texture object
-      // itself is disposed — each instance gets its own CanvasTexture.
-      tex.dispose();
-    }),
-  ]);
+  const gltf = await loader.loadAsync(MODEL_PATH);
 
   cachedScene = gltf.scene;
   cachedClips = gltf.animations;
-  cachedBaseTexture = baseTexture;
 
   console.log(
     `[lobster] Model loaded — ${cachedClips.length} clips, ` +
@@ -109,59 +90,15 @@ export async function loadLobsterModel(): Promise<void> {
   );
 }
 
-// ── Hue-shift texture ────────────────────────────────────────────────
-
-/**
- * Convert a CSS colour string to a hue angle (0-360).
- * Falls back to 0 (red) on parse failure.
- */
-function colorToHue(color: string): number {
-  const c = new THREE.Color(color);
-  const hsl = { h: 0, s: 0, l: 0 };
-  c.getHSL(hsl);
-  return Math.round(hsl.h * 360);
-}
-
-/**
- * Create a canvas copy of the base texture with a CSS hue-rotate filter
- * applied. The result is cached by hue angle so duplicate colours reuse
- * the same GPU texture.
- */
-function getHueShiftedTexture(hueAngle: number): THREE.CanvasTexture {
-  const cached = hueTextureCache.get(hueAngle);
-  if (cached) return cached;
-
-  if (!cachedBaseTexture) {
-    throw new Error("[lobster] Base texture not loaded — call loadLobsterModel() first");
-  }
-
-  const img = cachedBaseTexture;
-  const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth || img.width;
-  canvas.height = img.naturalHeight || img.height;
-
-  const ctx = canvas.getContext("2d")!;
-  ctx.filter = `hue-rotate(${hueAngle}deg)`;
-  ctx.drawImage(img, 0, 0);
-
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.flipY = false; // GLTF convention
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.needsUpdate = true;
-
-  hueTextureCache.set(hueAngle, tex);
-  return tex;
-}
-
 // ── Instance creator ─────────────────────────────────────────────────
 
 /**
- * Clone the cached GLTF model, apply a per-agent hue-shifted texture,
- * wire up an AnimationMixer with all clips, and return a LobsterInstance.
+ * Clone the cached GLTF model, wire up an AnimationMixer with all clips,
+ * and return a LobsterInstance. Uses the model's original texture as-is.
  *
  * Requires `loadLobsterModel()` to have completed first.
  */
-export function createLobsterInstance(color: string): LobsterInstance {
+export function createLobsterInstance(_color: string): LobsterInstance {
   if (!cachedScene) {
     throw new Error("[lobster] Model not loaded — call loadLobsterModel() first");
   }
@@ -171,36 +108,21 @@ export function createLobsterInstance(color: string): LobsterInstance {
   cloned.name = "lobster";
   cloned.scale.setScalar(0.025);
 
-  // Hue-shifted texture for this agent
-  const hue = colorToHue(color);
-  const tex = getHueShiftedTexture(hue);
-
-  // Collect all materials (we clone them so emissive hit-flash is independent)
+  // Collect materials (clone per instance so emissive hit-flash is independent)
   const materials: THREE.Material[] = [];
 
   cloned.traverse((child) => {
     if (!(child instanceof THREE.Mesh)) return;
     child.castShadow = true;
 
-    // Clone material per instance
     if (Array.isArray(child.material)) {
       child.material = child.material.map((m: THREE.Material) => {
         const clonedMat = m.clone();
-        if (clonedMat instanceof THREE.MeshStandardMaterial) {
-          clonedMat.map = tex;
-          clonedMat.emissiveMap = tex;
-          clonedMat.needsUpdate = true;
-        }
         materials.push(clonedMat);
         return clonedMat;
       });
     } else {
       const clonedMat = child.material.clone();
-      if (clonedMat instanceof THREE.MeshStandardMaterial) {
-        clonedMat.map = tex;
-        clonedMat.emissiveMap = tex;
-        clonedMat.needsUpdate = true;
-      }
       materials.push(clonedMat);
       child.material = clonedMat;
     }
