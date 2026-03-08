@@ -86,7 +86,10 @@ export class SolanaTransferService {
       }
     }
 
-    if (input.expectedFromWallet && resolution.senderWallet) {
+    if (input.expectedFromWallet) {
+      if (!resolution.senderWallet) {
+        return { ok: false, error: "sender_wallet_unresolved" };
+      }
       const expectedLower = input.expectedFromWallet.toLowerCase();
       if (resolution.senderWallet.toLowerCase() !== expectedLower) {
         return { ok: false, error: "sender_wallet_mismatch" };

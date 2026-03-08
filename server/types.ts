@@ -153,6 +153,8 @@ export interface BattleMessage {
   criticalHits?: string[];
   // Agents that were auto-guarded due to timeout
   timedOut?: string[];
+  // Epoch ms deadline for the current or next turn state carried by this event
+  turnDeadline?: number;
   timestamp: number;
 }
 
@@ -168,6 +170,32 @@ export interface BattleStateSummary {
   stamina?: Record<string, number>;
   // Epoch ms deadline for the current turn
   turnDeadline?: number;
+}
+
+export interface RuntimeIntentStreakState {
+  intent: BattleIntent | null;
+  count: number;
+}
+
+export interface RuntimeBattleState {
+  battleId: string;
+  participants: [string, string];
+  hp: Record<string, number>;
+  power: Record<string, number>;
+  stamina: Record<string, number>;
+  intents: Partial<Record<string, BattleIntent>>;
+  intentStreak: Record<string, RuntimeIntentStreakState>;
+  turn: number;
+  startedAt: number;
+  updatedAt: number;
+  turnStartedAt: number;
+  truceProposals: string[];
+}
+
+export interface RuntimeWorldAgentState {
+  profile: AgentProfile;
+  position: AgentPosition;
+  action: string;
 }
 
 export interface Alliance {

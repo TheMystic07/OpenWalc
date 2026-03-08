@@ -171,6 +171,55 @@ export class AllianceManager {
     return Array.from(this.alliances.values(), (alliance) => this.cloneAlliance(alliance));
   }
 
+  restore(alliances: Alliance[] | null | undefined): void {
+    this.alliances.clear();
+    this.agentAlliance.clear();
+    this.proposals.clear();
+
+    let nextIdFloor = 1;
+    if (!Array.isArray(alliances)) {
+      nextAllianceId = nextIdFloor;
+      return;
+    }
+
+    for (const rawAlliance of alliances) {
+      if (!rawAlliance || typeof rawAlliance !== "object") continue;
+      const allianceId = typeof rawAlliance.allianceId === "string" ? rawAlliance.allianceId.trim() : "";
+      const name = typeof rawAlliance.name === "string" ? rawAlliance.name.trim() : "";
+      const leader = typeof rawAlliance.leader === "string" ? rawAlliance.leader.trim() : "";
+      const formedAt = Number(rawAlliance.formedAt);
+      const members = Array.isArray(rawAlliance.members)
+        ? Array.from(new Set(
+          rawAlliance.members
+            .filter((member): member is string => typeof member === "string")
+            .map((member) => member.trim())
+            .filter((member) => member.length > 0),
+        ))
+        : [];
+
+      if (!allianceId || !name || members.length < 2 || !leader || !members.includes(leader)) {
+        continue;
+      }
+      if (!Number.isFinite(formedAt) || formedAt <= 0) continue;
+      if (members.some((member) => this.agentAlliance.has(member))) continue;
+
+      const alliance: Alliance = {
+        allianceId,
+        name,
+        members,
+        formedAt: Math.floor(formedAt),
+        leader,
+      };
+      this.alliances.set(allianceId, alliance);
+      for (const member of members) {
+        this.agentAlliance.set(member, allianceId);
+      }
+      nextIdFloor = Math.max(nextIdFloor, this.getNextIdFloor(allianceId));
+    }
+
+    nextAllianceId = nextIdFloor;
+  }
+
   removeAgent(agentId: string): void {
     // Clean up any pending proposals involving this agent
     for (const [proposalId, proposal] of this.proposals.entries()) {
@@ -259,5 +308,11 @@ export class AllianceManager {
 
   private cloneAlliance(alliance: Alliance): Alliance {
     return { ...alliance, members: [...alliance.members] };
+  }
+
+  private getNextIdFloor(allianceId: string): number {
+    const match = /^ally-(\d+)$/.exec(allianceId);
+    if (!match) return nextAllianceId;
+    return Math.max(1, Number(match[1]) + 1);
   }
 }

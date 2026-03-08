@@ -51,19 +51,34 @@ const SYSTEM_AGENT_ID = "system";
 
 /** Admin password — set via ADMIN_PASSWORD env var, fallback to "6969" */
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? "6969";
+const USING_DEFAULT_ADMIN_PASSWORD = !process.env.ADMIN_PASSWORD;
 
 /** Set of permanently banned agent IDs */
 const bannedAgentIds = new Set<string>();
 
-/** Check admin auth from X-Admin-Key header or ?key= query param */
+/** Check admin auth from the X-Admin-Key header. */
 function isAdminAuthed(req: IncomingMessage): boolean {
   const headerKey = req.headers["x-admin-key"];
   if (typeof headerKey === "string" && headerKey === ADMIN_PASSWORD) return true;
-  // Also support query param for simple GET requests
-  const url = new URL(req.url ?? "/", "http://localhost");
-  const queryKey = url.searchParams.get("key");
-  if (queryKey === ADMIN_PASSWORD) return true;
   return false;
+}
+
+async function openExternalUrl(url: string): Promise<void> {
+  const { execFile } = await import("node:child_process");
+  const command = process.platform === "darwin"
+    ? { file: "open", args: [url] }
+    : process.platform === "win32"
+      ? { file: "cmd", args: ["/c", "start", "", url] }
+      : { file: "xdg-open", args: [url] };
+
+  await new Promise<void>((resolve) => {
+    execFile(command.file, command.args, { windowsHide: true }, (err) => {
+      if (err) {
+        console.warn("[server] Failed to open browser:", err.message);
+      }
+      resolve();
+    });
+  });
 }
 const DEFAULT_PRIZE_SUMMARY = "Agents can fight for the pool or refuse violence.";
 const AUTO_CONNECT_NAME_FALLBACK = "ClawBot";
@@ -480,6 +495,9 @@ function buildRuntimeStateSnapshot(updatedAt = Date.now()): RuntimeStateSnapshot
     alive: Array.from(survivalAlive),
     bannedAgentIds: Array.from(bannedAgentIds),
     betting: bettingManager.exportRuntimeState(),
+    agents: state.exportRuntimeState(),
+    alliances: allianceManager.getAllAlliances(),
+    battles: battleManager.exportRuntimeState(),
     updatedAt,
   };
 }
@@ -489,6 +507,10 @@ function runtimeSyncFingerprint(snapshot: RuntimeStateSnapshot): string {
 }
 
 function applyRuntimeStateSnapshot(snapshot: RuntimeStateSnapshot): void {
+  state.restoreRuntimeState(snapshot.agents);
+  allianceManager.restore(snapshot.alliances);
+  battleManager.restoreRuntimeState(snapshot.battles);
+  spawnReservations.clear();
   currentRoundId = snapshot.currentRoundId;
   survivalState.status = snapshot.survival.status;
   survivalState.prizePoolUsd = snapshot.survival.prizePoolUsd;
@@ -568,7 +590,7 @@ function applyRuntimeStateSnapshot(snapshot: RuntimeStateSnapshot): void {
   }
 }
 
-async function syncRuntimeState(force = false): Promise<void> {
+async function syncRuntimeState(force = false, strict = false): Promise<void> {
   if (!neonRuntimeStore.enabled) return;
   runtimeSyncQueue = runtimeSyncQueue.catch(() => undefined).then(async () => {
     const snapshot = buildRuntimeStateSnapshot();
@@ -577,8 +599,12 @@ async function syncRuntimeState(force = false): Promise<void> {
 
     try {
       await neonRuntimeStore.save(snapshot);
+      registry.flush();
       lastRuntimeSyncPayload = fingerprint;
     } catch (error) {
+      if (strict) {
+        throw new Error(`[runtime] state sync failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       console.warn("[runtime] state sync failed:", error);
     }
   });
@@ -596,10 +622,29 @@ async function hydrateRuntimeState(): Promise<void> {
     console.log(
       `[runtime] restored state: survival=${survivalState.status}, phase=${phaseManager.getPhase()}, participants=${survivalParticipants.size}, alive=${survivalAlive.size}`,
     );
-  } catch (error) {
-    console.warn("[runtime] failed to hydrate state:", error);
   } finally {
     isHydratingRuntime = false;
+  }
+}
+
+function resumeRuntimeStateAfterHydrate(now = Date.now()): void {
+  if (survivalState.status !== "active") return;
+
+  phaseManager.tick(now);
+  allianceManager.expireProposals(now);
+
+  const timeoutEvents = battleManager.checkTimeouts(now);
+  for (const event of timeoutEvents) {
+    commandQueue.enqueue(event);
+  }
+  for (const notice of applyBattleConsequences(timeoutEvents)) {
+    commandQueue.enqueue(notice);
+  }
+
+  if (survivalState.roundEndsAt && now >= survivalState.roundEndsAt) {
+    for (const message of settleByTimer(now)) {
+      commandQueue.enqueue(message);
+    }
   }
 }
 
@@ -1629,7 +1674,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   // All admin routes require authentication
   if (url?.startsWith("/api/admin/")) {
     if (!isAdminAuthed(req)) {
-      return json(res, 401, { ok: false, error: "unauthorized", hint: "Provide X-Admin-Key header or ?key= query param" });
+      return json(res, 401, { ok: false, error: "unauthorized", hint: "Provide the X-Admin-Key header." });
     }
   }
 
@@ -2776,18 +2821,12 @@ async function handleCommand(parsed: Record<string, unknown>): Promise<unknown> 
 
     case "open-preview": {
       const a = args as { agentId?: string };
-      const vitePort = process.env.VITE_PORT ?? "3000";
+      const vitePort = process.env.VITE_PORT ?? "3001";
       const url = a?.agentId
         ? `http://localhost:${vitePort}/world.html?agent=${encodeURIComponent(a.agentId)}`
         : `http://localhost:${vitePort}/world.html`;
 
-      const { execFile } = await import("node:child_process");
-      const cmd = process.platform === "darwin" ? "open"
-        : process.platform === "win32" ? "start"
-        : "xdg-open";
-      execFile(cmd, [url], (err) => {
-        if (err) console.warn("[server] Failed to open browser:", err.message);
-      });
+      void openExternalUrl(url);
 
       return { ok: true, url };
     }
@@ -2808,6 +2847,9 @@ async function main() {
   console.log(`[room] Max agents: ${config.maxAgents} | Bind: ${config.host}:${config.port}`);
   console.log(`[survival] Prize pool: $${config.prizePoolUsd.toLocaleString()} | Status: ${survivalState.status}`);
   console.log(`[engine] Tick rate: ${TICK_RATE}Hz | AOI radius: 40 units`);
+  if (USING_DEFAULT_ADMIN_PASSWORD) {
+    console.warn("[admin] ADMIN_PASSWORD is not set. Falling back to the insecure default password.");
+  }
   console.log(
     `[betting] wallet configured: ${BET_WALLET_ADDRESS ? "yes" : "no"} | min: ${BET_MIN_AMOUNT} ${BET_TOKEN_SYMBOL}`,
   );
@@ -2827,15 +2869,14 @@ async function main() {
     console.log("[events] Neon event store: enabled");
   }
   if (neonRuntimeStore.enabled) {
-    await neonRuntimeStore.init().catch((error) => {
-      console.warn("[runtime] Neon runtime store initialization warning:", error);
-    });
+    await neonRuntimeStore.init();
     await hydrateRuntimeState();
+    resumeRuntimeStateAfterHydrate();
     runtimeSyncInterval = setInterval(() => {
       void syncRuntimeState();
     }, 2000);
-    await syncRuntimeState(true);
-    console.log("[runtime] Neon runtime state: enabled");
+    await syncRuntimeState(true, true);
+    console.log(`[runtime] Runtime state persistence: ${neonRuntimeStore.mode}`);
   }
 
   await nostr.init().catch((err) => {

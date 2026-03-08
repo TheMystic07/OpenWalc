@@ -1,4 +1,12 @@
-import { WORLD_SIZE, type AgentPosition, type AgentState, type JoinMessage, type WorldMessage } from "./types.js";
+import {
+  WORLD_SIZE,
+  type AgentPosition,
+  type AgentProfile,
+  type AgentState,
+  type JoinMessage,
+  type RuntimeWorldAgentState,
+  type WorldMessage,
+} from "./types.js";
 
 /** Euclidean distance between two agents on the XZ plane. Returns Infinity if either is missing. */
 export function agentDistance(
@@ -147,6 +155,42 @@ export class WorldState {
     return result;
   }
 
+  exportRuntimeState(): RuntimeWorldAgentState[] {
+    const agents: RuntimeWorldAgentState[] = [];
+    for (const [agentId, position] of this.positions.entries()) {
+      const profile = this.registry.get(agentId);
+      if (!profile) continue;
+      agents.push({
+        profile: this.cloneProfile(profile),
+        position: { ...position },
+        action: this.actions.get(agentId) ?? "idle",
+      });
+    }
+    agents.sort((a, b) => a.profile.agentId.localeCompare(b.profile.agentId));
+    return agents;
+  }
+
+  restoreRuntimeState(agents: RuntimeWorldAgentState[] | null | undefined): void {
+    this.positions.clear();
+    this.actions.clear();
+
+    if (!Array.isArray(agents)) return;
+
+    for (const agent of agents) {
+      const agentId = agent?.profile?.agentId?.trim();
+      if (!agentId) continue;
+      this.registry.register({
+        ...agent.profile,
+        agentId,
+      });
+      this.positions.set(agentId, {
+        ...agent.position,
+        agentId,
+      });
+      this.actions.set(agentId, typeof agent.action === "string" && agent.action ? agent.action : "idle");
+    }
+  }
+
   /** Get position of a specific agent */
   getPosition(agentId: string): AgentPosition | undefined {
     return this.positions.get(agentId);
@@ -244,5 +288,14 @@ export class WorldState {
       }
     }
     return false;
+  }
+
+  private cloneProfile(profile: AgentProfile): AgentProfile {
+    return {
+      ...profile,
+      capabilities: [...profile.capabilities],
+      skills: profile.skills?.map((skill) => ({ ...skill })),
+      combat: profile.combat ? { ...profile.combat } : undefined,
+    };
   }
 }

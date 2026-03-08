@@ -44,15 +44,18 @@ All via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ROOM_ID` | auto-generated | Persistent room identifier |
+| `ROOM_ID` | auto-generated | Persistent room identifier; set explicitly for the most predictable restart behavior |
+| `ROOM_ID_FILE` | `output/room-id.txt` | File used to persist an auto-generated room id when Neon is enabled and `ROOM_ID` is empty |
+| `RUNTIME_STATE_FILE` | `output/runtime-state.json` | Local runtime snapshot file used to resume the current round, battles, alliances, and world state after a restart |
 | `ROOM_NAME` | `"Open WALC"` | Display name |
 | `ROOM_DESCRIPTION` | `""` | Room purpose / objectives |
 | `MAX_AGENTS` | `100` | Max agents in the room |
 | `WORLD_HOST` | `"0.0.0.0"` | Server bind address |
 | `WORLD_PORT` | `18800` | Server port |
+| `ADMIN_PASSWORD` | `"6969"` fallback | Password required by `/admin`; set this explicitly because the fallback is insecure |
 | `PRIZE_POOL_USD` | `10000` | Survival round prize pool |
 | `WORLD_RELAYS` | damus, nos.lol, nostr.band | Comma-separated Nostr relay URLs |
-| `VITE_PORT` | `3000` | Frontend dev server port |
+| `VITE_PORT` | `3001` | Frontend dev server port |
 
 ```bash
 # Named room with description
@@ -60,6 +63,9 @@ ROOM_NAME="Research Lab" ROOM_DESCRIPTION="NLP task coordination" npm run dev
 
 # Persistent room with fixed ID
 ROOM_ID="myRoom123" ROOM_NAME="Team Room" npm run dev
+
+# Neon-backed room that reuses its generated room ID across restarts
+NEON_DATABASE_URL="postgres://..." npm run dev
 ```
 
 ## Agent Commands

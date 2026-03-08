@@ -9,3 +9,5 @@ clawhub-installed.json
 .env
 .DS_Store
 coverage/
+output/room-id.txt
+output/runtime-state.json

@@ -74,6 +74,15 @@ const _frustum = new THREE.Frustum();
 const LABEL_COMPACT_START_DISTANCE = Math.max(18, PROXIMITY_RADIUS * 0.45);
 const LABEL_DECLUTTER_PADDING = 6;
 const LABEL_MAX_VISIBLE = 42;
+const LABEL_Y = 0.16;
+const CHAT_BUBBLE_Y = 0.98;
+const COMBAT_INDICATOR_Y = 0.9;
+const COMBAT_HP_Y = 0.44;
+const COMBAT_STAMINA_Y = 0.1;
+const INTENT_Y = 0.72;
+const DAMAGE_Y = 0.62;
+const EMOTE_Y = 1.26;
+const MAX_BUBBLE_TEXT = 120;
 
 /**
  * CSS2DObjects start at screen (0,0) on first frame before the renderer
@@ -128,6 +137,7 @@ export class EffectsManager {
       entry.nameEl.textContent = name;
       entry.accentColor = color;
       entry.rootEl.style.setProperty("--label-accent", color);
+      this.attachToAgent(agentId, entry.object);
       return;
     }
 
@@ -143,15 +153,15 @@ export class EffectsManager {
 
     const metaEl = document.createElement("span");
     metaEl.className = "lobster-label-meta";
-    metaEl.textContent = "ACTIVE";
+    metaEl.textContent = "";
 
     rootEl.appendChild(nameEl);
     rootEl.appendChild(metaEl);
     deferShow(rootEl);
 
     const obj = new CSS2DObject(rootEl);
-    obj.position.set(this.getOverlayOffset(agentId, 1.05), 2.95, 0);
-    obj.center.set(0.5, 0);
+    obj.position.set(0, LABEL_Y, 0);
+    obj.center.set(0.5, 1);
     obj.name = `label_${agentId}`;
 
     entry = {
@@ -173,7 +183,8 @@ export class EffectsManager {
     if (!entry) return;
     entry.inCombat = inCombat;
     entry.rootEl.classList.toggle("lobster-label-combat", inCombat);
-    entry.metaEl.textContent = inCombat ? "IN DUEL" : "ACTIVE";
+    entry.rootEl.classList.toggle("lobster-label-has-meta", inCombat);
+    entry.metaEl.textContent = inCombat ? "IN DUEL" : "";
   }
 
   /** Remove a name label */
@@ -190,14 +201,35 @@ export class EffectsManager {
   showBubble(agentId: string, text: string): void {
     this.removeBubble(agentId);
 
+    const labelEntry = this.labels.get(agentId);
+    const accent = labelEntry?.accentColor ?? "#79c0ff";
+    const displayName = labelEntry?.nameEl.textContent?.trim() || agentId;
+    const trimmedText = text.length > MAX_BUBBLE_TEXT ? `${text.slice(0, MAX_BUBBLE_TEXT)}\u2026` : text;
+
     const el = document.createElement("div");
     el.className = "chat-bubble";
-    el.textContent = text.length > 80 ? text.slice(0, 80) + "\u2026" : text;
+    el.style.setProperty("--bubble-accent", accent);
+
+    const headerEl = document.createElement("div");
+    headerEl.className = "chat-bubble-header";
+
+    const badgeEl = document.createElement("span");
+    badgeEl.className = "chat-bubble-badge";
+    badgeEl.textContent = displayName;
+
+    headerEl.appendChild(badgeEl);
+    el.appendChild(headerEl);
+
+    const bodyEl = document.createElement("div");
+    bodyEl.className = "chat-bubble-body";
+    bodyEl.textContent = trimmedText;
+    el.appendChild(bodyEl);
+
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.25), 5.25, 0);
-    obj.center.set(0.5, 0);
+    obj.position.set(0, CHAT_BUBBLE_Y, 0);
+    obj.center.set(0.5, 1);
     obj.name = `bubble_${agentId}`;
 
     const entry: BubbleEntry = {
@@ -241,7 +273,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.1), 5.05, 0);
+    obj.position.set(0, COMBAT_INDICATOR_Y, 0);
     obj.center.set(0.5, 0);
     obj.name = `combat_${agentId}`;
     this.combatIndicators.set(agentId, { object: obj, agentId });
@@ -279,7 +311,7 @@ export class EffectsManager {
       deferShow(el);
 
       const obj = new CSS2DObject(el);
-      obj.position.set(this.getOverlayOffset(agentId, 0.95), 3.85, 0);
+      obj.position.set(0, COMBAT_HP_Y, 0);
       obj.center.set(0.5, 0);
       obj.name = `combat_hp_${agentId}`;
 
@@ -326,7 +358,7 @@ export class EffectsManager {
       deferShow(el);
 
       const obj = new CSS2DObject(el);
-      obj.position.set(this.getOverlayOffset(agentId, 0.95), 3.5, 0);
+      obj.position.set(0, COMBAT_STAMINA_Y, 0);
       obj.center.set(0.5, 0);
       obj.name = `combat_stamina_${agentId}`;
 
@@ -349,8 +381,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    const offset = this.getOverlayOffset(agentId, 1.05);
-    obj.position.set(offset + (Math.random() - 0.5) * 0.3, 4.8 + Math.random() * 0.3, 0);
+    obj.position.set((Math.random() - 0.5) * 0.2, DAMAGE_Y + 0.86 + Math.random() * 0.22, 0);
     obj.center.set(0.5, 0);
     obj.name = `read_${agentId}_${this.nextDamageId}`;
 
@@ -372,7 +403,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.05), 5.35, 0);
+    obj.position.set(0, DAMAGE_Y + 1.1, 0);
     obj.center.set(0.5, 0);
     obj.name = `timeout_${agentId}_${this.nextDamageId}`;
 
@@ -394,7 +425,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.05), 5.1, 0);
+    obj.position.set(0, DAMAGE_Y + 0.95, 0);
     obj.center.set(0.5, 0);
     obj.name = `flee_${agentId}_${this.nextDamageId}`;
 
@@ -416,7 +447,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.05), 5.1, 0);
+    obj.position.set(0, DAMAGE_Y + 0.95, 0);
     obj.center.set(0.5, 0);
     obj.name = `truce_${agentId}_${this.nextDamageId}`;
 
@@ -451,7 +482,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.0), 4.55, 0);
+    obj.position.set(0, INTENT_Y, 0);
     obj.center.set(0.5, 0);
     obj.name = `intent_${agentId}_${this.nextDamageId++}`;
 
@@ -479,8 +510,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    const offset = this.getOverlayOffset(agentId, 1.05);
-    obj.position.set(offset + (Math.random() - 0.5) * 0.5, 4.15 + Math.random() * 0.5, 0);
+    obj.position.set((Math.random() - 0.5) * 0.28, DAMAGE_Y + Math.random() * 0.35, 0);
     obj.center.set(0.5, 0);
     obj.name = `dmg_${agentId}_${this.nextDamageId}`;
 
@@ -507,7 +537,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.05), 4.45, 0);
+    obj.position.set(0, DAMAGE_Y + 0.2, 0);
     obj.center.set(0.5, 0);
     obj.name = `ko_${agentId}_${this.nextDamageId}`;
 
@@ -545,7 +575,7 @@ export class EffectsManager {
     deferShow(el);
 
     const obj = new CSS2DObject(el);
-    obj.position.set(this.getOverlayOffset(agentId, 1.25), 5.72, 0);
+    obj.position.set(0, EMOTE_Y, 0);
     obj.center.set(0.5, 0);
     obj.name = `emote_${agentId}`;
 
@@ -643,6 +673,7 @@ export class EffectsManager {
     // Proximity-based visibility for transient overlays
     const camPos = camera.position;
     for (const entry of this.bubbles.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const parent = entry.object.parent;
       if (parent) {
         parent.getWorldPosition(_worldPos);
@@ -650,30 +681,35 @@ export class EffectsManager {
       }
     }
     for (const entry of this.combatIndicators.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const parent = entry.object.parent;
       if (!parent) continue;
       parent.getWorldPosition(_worldPos);
       entry.object.visible = this.isPointInView(camera, _worldPos);
     }
     for (const entry of this.combatHpBars.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const parent = entry.object.parent;
       if (!parent) continue;
       parent.getWorldPosition(_worldPos);
       entry.object.visible = this.isPointInView(camera, _worldPos);
     }
     for (const entry of this.combatStaminaBars.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const parent = entry.object.parent;
       if (!parent) continue;
       parent.getWorldPosition(_worldPos);
       entry.object.visible = this.isPointInView(camera, _worldPos);
     }
     for (const entry of this.intents.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const parent = entry.object.parent;
       if (!parent) continue;
       parent.getWorldPosition(_worldPos);
       entry.object.visible = this.isPointInView(camera, _worldPos);
     }
     for (const entry of this.damages.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const parent = entry.object.parent;
       if (parent) {
         parent.getWorldPosition(_worldPos);
@@ -698,6 +734,7 @@ export class EffectsManager {
 
     const candidates: LabelCandidate[] = [];
     for (const entry of this.labels.values()) {
+      this.attachToAgent(entry.agentId, entry.object);
       const anchor = this.getAgentAnchor(entry.agentId);
       if (!anchor) {
         entry.object.visible = false;
@@ -724,15 +761,14 @@ export class EffectsManager {
       entry.rootEl.classList.toggle("lobster-label-compact", compact);
 
       const distanceRatio = THREE.MathUtils.clamp(distance / PROXIMITY_RADIUS, 0, 1);
-      const scale = THREE.MathUtils.lerp(1, 0.74, distanceRatio);
-      const alpha = THREE.MathUtils.lerp(1, 0.45, distanceRatio);
+      const scale = THREE.MathUtils.lerp(1, 0.88, distanceRatio);
+      const alpha = THREE.MathUtils.lerp(1, 0.78, distanceRatio);
       entry.rootEl.style.setProperty("--label-scale", scale.toFixed(3));
       entry.rootEl.style.setProperty("--label-alpha", alpha.toFixed(3));
-      entry.metaEl.textContent = `${entry.inCombat ? "IN DUEL" : "ACTIVE"} | ${Math.round(distance)}m`;
 
       const nameLength = entry.nameEl.textContent?.length ?? 8;
-      const widthEstimate = Math.min(compact ? 165 : 220, (compact ? 56 : 70) + nameLength * (compact ? 6 : 7.4));
-      const heightEstimate = compact ? 22 : 32;
+      const widthEstimate = Math.min(compact ? 170 : 240, (compact ? 68 : 92) + nameLength * (compact ? 6.4 : 8.2));
+      const heightEstimate = compact || !entry.inCombat ? 26 : 42;
       const priority = entry.inCombat ? 1000 : 100;
 
       candidates.push({
@@ -816,9 +852,8 @@ export class EffectsManager {
   /** Attach a CSS2DObject to a lobster group in the scene */
   private attachToAgent(agentId: string, obj: CSS2DObject): void {
     const anchor = this.getAgentAnchor(agentId);
-    if (anchor) {
-      anchor.add(obj);
-    }
+    if (!anchor || obj.parent === anchor) return;
+    anchor.add(obj);
   }
 
   private getAgentAnchor(agentId: string): THREE.Object3D | null {
@@ -830,7 +865,7 @@ export class EffectsManager {
     let found: THREE.Object3D | null = null;
     this.scene.traverse((child) => {
       if (found) return;
-      if (child.userData.agentId === agentId && child.name === "lobster") {
+      if (child.userData.agentId === agentId && child.userData.overlayAnchor === true) {
         found = child;
       }
     });
@@ -842,14 +877,5 @@ export class EffectsManager {
 
     this.agentAnchors.delete(agentId);
     return null;
-  }
-
-  private getOverlayOffset(agentId: string, spread = 0.6): number {
-    let hash = 0;
-    for (let i = 0; i < agentId.length; i++) {
-      hash = (hash * 33 + agentId.charCodeAt(i)) >>> 0;
-    }
-    const normalized = (hash % 1000) / 999; // [0, 1]
-    return (normalized - 0.5) * spread;
   }
 }

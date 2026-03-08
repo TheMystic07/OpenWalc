@@ -217,10 +217,6 @@ function showFeedback(el: HTMLElement, text: string, isError = false): void {
   setTimeout(() => { el.textContent = ""; }, 4000);
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 function formatTimestamp(ts: number | null | undefined): string {
   if (!ts) return "-";
   return new Date(ts).toLocaleString();
@@ -257,6 +253,33 @@ function formatApiError(error: unknown, hint?: unknown): string {
   const base = known[normalized] ?? code.replaceAll("_", " ");
   const hintText = typeof hint === "string" && hint.trim().length > 0 ? ` ${hint.trim()}` : "";
   return `${base}${hintText}`.trim();
+}
+
+function appendEmptyRow(tbody: HTMLElement, colspan: number, text: string): void {
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = colspan;
+  cell.className = "admin-empty";
+  cell.textContent = text;
+  row.appendChild(cell);
+  tbody.replaceChildren(row);
+}
+
+function appendInlineActionButton(
+  parent: HTMLElement,
+  label: string,
+  className: string,
+  onClick: () => void,
+): void {
+  if (parent.childNodes.length > 0) {
+    parent.appendChild(document.createTextNode(" "));
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  parent.appendChild(button);
 }
 
 // ── Render ──────────────────────────────────────────────────────
@@ -334,7 +357,7 @@ function render(data: AdminStatus): void {
 
 function renderAgents(agents: AdminAgent[]): void {
   if (agents.length === 0) {
-    agentTbody.innerHTML = `<tr><td colspan="6" class="admin-empty">No agents registered.</td></tr>`;
+    appendEmptyRow(agentTbody, 6, "No agents registered.");
     return;
   }
 
@@ -344,74 +367,123 @@ function renderAgents(agents: AdminAgent[]): void {
     return a.name.localeCompare(b.name);
   });
 
-  agentTbody.innerHTML = sorted
-    .map((a) => {
-      let statusClass = "badge-offline";
-      let statusText = "Offline";
-      if (a.isBanned) { statusClass = "badge-banned"; statusText = "Banned"; }
-      else if (a.isDead) { statusClass = "badge-dead"; statusText = "Dead"; }
-      else if (a.isOnline && a.isAlive) { statusClass = "badge-alive"; statusText = "Alive"; }
-      else if (a.isOnline) { statusClass = "badge-online"; statusText = "Online"; }
+  agentTbody.textContent = "";
+  for (const agent of sorted) {
+    let statusClass = "badge-offline";
+    let statusText = "Offline";
+    if (agent.isBanned) { statusClass = "badge-banned"; statusText = "Banned"; }
+    else if (agent.isDead) { statusClass = "badge-dead"; statusText = "Dead"; }
+    else if (agent.isOnline && agent.isAlive) { statusClass = "badge-alive"; statusText = "Alive"; }
+    else if (agent.isOnline) { statusClass = "badge-online"; statusText = "Online"; }
 
-      const walletShort = a.walletAddress.length > 16
-        ? a.walletAddress.slice(0, 8) + "..." + a.walletAddress.slice(-6)
-        : a.walletAddress;
+    const walletShort = agent.walletAddress.length > 16
+      ? agent.walletAddress.slice(0, 8) + "..." + agent.walletAddress.slice(-6)
+      : agent.walletAddress;
 
-      const deadInfo = a.isDead && a.killedAt
-        ? `<br><span class="admin-mono" style="color:#f85149">Died: ${formatTimestamp(a.killedAt)}</span>`
-        : "";
+    const row = document.createElement("tr");
 
-      // Action buttons per agent
-      let actions = "";
-      if (a.isOnline && !a.isDead) {
-        actions += `<button class="admin-btn-inline admin-btn-yellow" onclick="window.__adminKick('${escapeHtml(a.agentId)}')">Kick</button> `;
-      }
-      if (!a.isBanned) {
-        actions += `<button class="admin-btn-inline admin-btn-red" onclick="window.__adminBan('${escapeHtml(a.agentId)}')">Ban</button> `;
-      } else {
-        actions += `<button class="admin-btn-inline admin-btn-small" onclick="window.__adminUnban('${escapeHtml(a.agentId)}')">Unban</button> `;
-      }
-      if (a.isDead) {
-        actions += `<button class="admin-btn-inline admin-btn-green" onclick="window.__adminRevive('${escapeHtml(a.agentId)}')">Revive</button>`;
-      }
+    const agentCell = document.createElement("td");
+    const dot = document.createElement("span");
+    dot.className = "agent-dot";
+    dot.style.background = agent.color;
+    agentCell.appendChild(dot);
+    agentCell.appendChild(document.createTextNode(` ${agent.name}`));
+    if (agent.isDead && agent.killedAt) {
+      agentCell.appendChild(document.createElement("br"));
+      const deadInfo = document.createElement("span");
+      deadInfo.className = "admin-mono";
+      deadInfo.style.color = "#f85149";
+      deadInfo.textContent = `Died: ${formatTimestamp(agent.killedAt)}`;
+      agentCell.appendChild(deadInfo);
+    }
+    row.appendChild(agentCell);
 
-      return `<tr>
-        <td>
-          <span class="agent-dot" style="background:${a.color}"></span>
-          ${escapeHtml(a.name)}
-          ${deadInfo}
-        </td>
-        <td><span class="${statusClass}">${statusText}</span></td>
-        <td>${a.kills}</td>
-        <td>${a.deaths}</td>
-        <td class="admin-mono">${escapeHtml(walletShort)}</td>
-        <td>${actions}</td>
-      </tr>`;
-    })
-    .join("");
+    const statusCell = document.createElement("td");
+    const statusBadge = document.createElement("span");
+    statusBadge.className = statusClass;
+    statusBadge.textContent = statusText;
+    statusCell.appendChild(statusBadge);
+    row.appendChild(statusCell);
+
+    const killsCell = document.createElement("td");
+    killsCell.textContent = String(agent.kills);
+    row.appendChild(killsCell);
+
+    const deathsCell = document.createElement("td");
+    deathsCell.textContent = String(agent.deaths);
+    row.appendChild(deathsCell);
+
+    const walletCell = document.createElement("td");
+    walletCell.className = "admin-mono";
+    walletCell.textContent = walletShort;
+    row.appendChild(walletCell);
+
+    const actionsCell = document.createElement("td");
+    if (agent.isOnline && !agent.isDead) {
+      appendInlineActionButton(actionsCell, "Kick", "admin-btn-inline admin-btn-yellow", () => {
+        void adminPost("kick", { agentId: agent.agentId }, agentFeedback);
+      });
+    }
+    if (!agent.isBanned) {
+      appendInlineActionButton(actionsCell, "Ban", "admin-btn-inline admin-btn-red", () => {
+        if (!confirm(`Ban agent ${agent.agentId}?`)) return;
+        void adminPost("ban", { agentId: agent.agentId }, agentFeedback);
+      });
+    } else {
+      appendInlineActionButton(actionsCell, "Unban", "admin-btn-inline admin-btn-small", () => {
+        void adminPost("unban", { agentId: agent.agentId }, agentFeedback);
+      });
+    }
+    if (agent.isDead) {
+      appendInlineActionButton(actionsCell, "Revive", "admin-btn-inline admin-btn-green", () => {
+        void adminPost("revive", { agentId: agent.agentId }, agentFeedback);
+      });
+    }
+    row.appendChild(actionsCell);
+
+    agentTbody.appendChild(row);
+  }
 }
 
 function renderBattles(battles: AdminBattle[], agents: AdminAgent[]): void {
   if (!battles || battles.length === 0) {
-    battleTbody.innerHTML = `<tr><td colspan="5" class="admin-empty">No active battles.</td></tr>`;
+    appendEmptyRow(battleTbody, 5, "No active battles.");
     return;
   }
 
   const nameMap = new Map(agents.map((a) => [a.agentId, a.name]));
+  battleTbody.textContent = "";
+  for (const battle of battles) {
+    const leftName = nameMap.get(battle.participants[0]) ?? battle.participants[0]?.slice(0, 12) ?? "?";
+    const rightName = nameMap.get(battle.participants[1]) ?? battle.participants[1]?.slice(0, 12) ?? "?";
 
-  battleTbody.innerHTML = battles
-    .map((b) => {
-      const a = nameMap.get(b.participants[0]) ?? b.participants[0]?.slice(0, 12);
-      const bName = nameMap.get(b.participants[1]) ?? b.participants[1]?.slice(0, 12);
-      return `<tr>
-        <td class="admin-mono">${escapeHtml(b.battleId?.slice(0, 12) ?? "?")}</td>
-        <td>${escapeHtml(a)}</td>
-        <td>${escapeHtml(bName)}</td>
-        <td>${b.turn ?? "-"}</td>
-        <td><button class="admin-btn-inline admin-btn-red" onclick="window.__adminEndBattle('${escapeHtml(b.battleId)}')">End</button></td>
-      </tr>`;
-    })
-    .join("");
+    const row = document.createElement("tr");
+
+    const battleIdCell = document.createElement("td");
+    battleIdCell.className = "admin-mono";
+    battleIdCell.textContent = battle.battleId?.slice(0, 12) ?? "?";
+    row.appendChild(battleIdCell);
+
+    const leftCell = document.createElement("td");
+    leftCell.textContent = leftName;
+    row.appendChild(leftCell);
+
+    const rightCell = document.createElement("td");
+    rightCell.textContent = rightName;
+    row.appendChild(rightCell);
+
+    const turnCell = document.createElement("td");
+    turnCell.textContent = String(battle.turn ?? "-");
+    row.appendChild(turnCell);
+
+    const actionsCell = document.createElement("td");
+    appendInlineActionButton(actionsCell, "End", "admin-btn-inline admin-btn-red", () => {
+      void adminPost("end-battle", { battleId: battle.battleId }, agentFeedback);
+    });
+    row.appendChild(actionsCell);
+
+    battleTbody.appendChild(row);
+  }
 }
 
 // ── API calls ───────────────────────────────────────────────────
@@ -551,24 +623,6 @@ btnRevive.addEventListener("click", () => {
 });
 
 // Inline action buttons (called from table rows via onclick)
-const w = window as unknown as Record<string, (id: string) => void>;
-
-w.__adminKick = (id: string) => {
-  adminPost("kick", { agentId: id }, agentFeedback);
-};
-w.__adminBan = (id: string) => {
-  if (!confirm(`Ban agent ${id}?`)) return;
-  adminPost("ban", { agentId: id }, agentFeedback);
-};
-w.__adminUnban = (id: string) => {
-  adminPost("unban", { agentId: id }, agentFeedback);
-};
-w.__adminRevive = (id: string) => {
-  adminPost("revive", { agentId: id }, agentFeedback);
-};
-w.__adminEndBattle = (id: string) => {
-  adminPost("end-battle", { battleId: id }, agentFeedback);
-};
 
 // ── Boot ────────────────────────────────────────────────────────
 

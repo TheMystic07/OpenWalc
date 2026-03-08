@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { BattleManager } from "../battle-manager.js";
-import type { AgentPosition } from "../types.js";
+import { BATTLE_RANGE, type AgentPosition } from "../types.js";
 
 function makePos(agentId: string, x: number, z: number): AgentPosition {
   return {
@@ -56,6 +56,28 @@ describe("BattleManager", () => {
     expect(result.error).toMatch(/too far/i);
   });
 
+  it("uses the shared battle range constant for start distance checks", () => {
+    const edgeResult = manager.startBattle(
+      "lobster-a",
+      "lobster-b",
+      makePos("lobster-a", 0, 0),
+      makePos("lobster-b", BATTLE_RANGE, 0),
+      undefined,
+      1000,
+    );
+    expect(edgeResult.ok).toBe(true);
+
+    const overRangeResult = manager.startBattle(
+      "lobster-a",
+      "lobster-b",
+      makePos("lobster-a", 0, 0),
+      makePos("lobster-b", BATTLE_RANGE + 0.01, 0),
+      undefined,
+      1000,
+    );
+    expect(overRangeResult.ok).toBe(false);
+  });
+
   it("resolves a round after both intents are submitted", () => {
     const { battle } = startNearby(manager);
     const battleId = battle.battleId;
@@ -72,6 +94,47 @@ describe("BattleManager", () => {
     expect(secondIntent.events.map((ev) => ev.phase)).toEqual(["intent", "round"]);
     const round = secondIntent.events.find((ev) => ev.phase === "round");
     expect(round?.damage).toBeTruthy();
+    expect(secondIntent.battle?.turn).toBe(2);
+  });
+
+  it("includes turn deadlines in start, intent, round, and summary payloads", () => {
+    const startedAt = 1000;
+    const { battle, events } = startNearby(manager, startedAt);
+    expect(events[0].turnDeadline).toBe(startedAt + 30_000);
+    expect(battle.turnDeadline).toBe(startedAt + 30_000);
+
+    const firstIntent = manager.submitIntent("lobster-a", battle.battleId, "strike", 1100);
+    expect(firstIntent.ok).toBe(true);
+    if (!firstIntent.ok) return;
+    expect(firstIntent.events[0].turnDeadline).toBe(startedAt + 30_000);
+
+    const secondIntent = manager.submitIntent("lobster-b", battle.battleId, "guard", 1200);
+    expect(secondIntent.ok).toBe(true);
+    if (!secondIntent.ok) return;
+
+    const round = secondIntent.events.find((event) => event.phase === "round");
+    expect(round?.turnDeadline).toBe(1200 + 30_000);
+    expect(secondIntent.battle?.turnDeadline).toBe(1200 + 30_000);
+  });
+
+  it("restores an in-flight battle so the running turn can continue after restart", () => {
+    const { battle } = startNearby(manager, 1000);
+    const firstIntent = manager.submitIntent("lobster-a", battle.battleId, "strike", 1100);
+    expect(firstIntent.ok).toBe(true);
+    if (!firstIntent.ok) return;
+
+    const restoredManager = new BattleManager();
+    restoredManager.restoreRuntimeState(manager.exportRuntimeState());
+
+    const [restoredBattle] = restoredManager.listActive();
+    expect(restoredBattle?.battleId).toBe(battle.battleId);
+    expect(restoredBattle?.pending).toEqual(["lobster-b"]);
+    expect(restoredBattle?.turnDeadline).toBe(31_000);
+
+    const secondIntent = restoredManager.submitIntent("lobster-b", battle.battleId, "guard", 1200);
+    expect(secondIntent.ok).toBe(true);
+    if (!secondIntent.ok) return;
+    expect(secondIntent.events.map((event) => event.phase)).toEqual(["intent", "round"]);
     expect(secondIntent.battle?.turn).toBe(2);
   });
 

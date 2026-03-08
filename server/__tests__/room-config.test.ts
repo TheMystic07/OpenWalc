@@ -1,9 +1,23 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadRoomConfig } from "../room-config.js";
 
 describe("loadRoomConfig", () => {
   const savedEnv: Record<string, string | undefined> = {};
-  const envKeys = ["ROOM_ID", "ROOM_NAME", "ROOM_DESCRIPTION", "WORLD_HOST", "WORLD_PORT", "MAX_AGENTS", "PRIZE_POOL_USD"];
+  const envKeys = [
+    "ROOM_ID",
+    "ROOM_ID_FILE",
+    "ROOM_NAME",
+    "ROOM_DESCRIPTION",
+    "WORLD_HOST",
+    "WORLD_PORT",
+    "MAX_AGENTS",
+    "PRIZE_POOL_USD",
+    "NEON_DATABASE_URL",
+  ];
+  let tempDir: string | null = null;
 
   beforeEach(() => {
     for (const k of envKeys) {
@@ -16,6 +30,10 @@ describe("loadRoomConfig", () => {
     for (const [k, v] of Object.entries(savedEnv)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
+    }
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+      tempDir = null;
     }
   });
 
@@ -55,5 +73,17 @@ describe("loadRoomConfig", () => {
     const id1 = loadRoomConfig().roomId;
     const id2 = loadRoomConfig().roomId;
     expect(id1).not.toBe(id2);
+  });
+
+  it("reuses a generated room id across restarts when Neon persistence is enabled", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "openclaw-room-config-"));
+    process.env.NEON_DATABASE_URL = "postgres://example";
+    process.env.ROOM_ID_FILE = join(tempDir, "room-id.txt");
+
+    const first = loadRoomConfig().roomId;
+    const second = loadRoomConfig().roomId;
+
+    expect(first).toHaveLength(12);
+    expect(second).toBe(first);
   });
 });

@@ -40,9 +40,12 @@ interface Obstacle {
 const LOBSTER_RADIUS = 1.8;
 const AVOIDANCE_LOOKAHEAD = 4;
 const AVOIDANCE_FORCE = 6;
+const OVERLAY_HEAD_PADDING = 0.1;
 export class LobsterManager {
   private scene: THREE.Scene;
   private lobsters = new Map<string, LobsterEntry>();
+  private pendingCreates = new Set<string>();
+  private pendingEntries = new Map<string, { profile: AgentProfile; position: AgentPosition }>();
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private obstacles: Obstacle[] = [];
@@ -65,13 +68,18 @@ export class LobsterManager {
   addOrUpdate(profile: AgentProfile, position: AgentPosition): void {
     let entry = this.lobsters.get(profile.agentId);
     if (!entry) {
-      // Create a placeholder entry immediately so duplicate calls don't spawn
-      // multiple instances. The actual GLTF instance is wired up asynchronously.
+      this.pendingEntries.set(profile.agentId, {
+        profile,
+        position: { ...position },
+      });
+      if (this.pendingCreates.has(profile.agentId)) return;
+      this.pendingCreates.add(profile.agentId);
       this.modelReady.then(() => {
-        // Guard: another addOrUpdate may have already created this entry while
-        // we were waiting for the model.
-        if (this.lobsters.has(profile.agentId)) return;
-        this._createEntry(profile, position);
+        this.pendingCreates.delete(profile.agentId);
+        const pending = this.pendingEntries.get(profile.agentId);
+        this.pendingEntries.delete(profile.agentId);
+        if (this.lobsters.has(profile.agentId) || !pending) return;
+        this._createEntry(pending.profile, pending.position);
       });
     } else {
       entry.profile = profile;
@@ -83,9 +91,22 @@ export class LobsterManager {
   /** Create a fully initialised LobsterEntry once the GLTF model is ready. */
   private _createEntry(profile: AgentProfile, position: AgentPosition): void {
     const inst = createLobsterInstance(profile.color);
+    const overlayAnchorOffset = this.resolveOverlayAnchorOffset(inst.group);
     inst.group.position.set(position.x, position.y, position.z);
     inst.group.rotation.y = position.rotation;
     inst.group.userData.agentId = profile.agentId;
+
+    // Stable overlay anchor positioned at the visual top-center of the lobster.
+    // The anchor lives on the agent root, but its local offset is derived from
+    // the model bounds so labels sit over the head/body instead of the root pivot.
+    const overlayAnchor = new THREE.Group();
+    overlayAnchor.name = "overlay_anchor";
+    overlayAnchor.userData.agentId = profile.agentId;
+    overlayAnchor.userData.overlayAnchor = true;
+    overlayAnchor.position.copy(overlayAnchorOffset);
+    const inverseScale = inst.group.scale.x !== 0 ? 1 / inst.group.scale.x : 1;
+    overlayAnchor.scale.setScalar(inverseScale);
+    inst.group.add(overlayAnchor);
 
     // Inner combat ring
     const combatRingMat = new THREE.MeshBasicMaterial({
@@ -149,6 +170,22 @@ export class LobsterManager {
       currentClip: initialClip,
     };
     this.lobsters.set(profile.agentId, entry);
+  }
+
+  private resolveOverlayAnchorOffset(group: THREE.Group): THREE.Vector3 {
+    group.updateMatrixWorld(true);
+    const bounds = new THREE.Box3().setFromObject(group);
+    if (bounds.isEmpty()) {
+      return new THREE.Vector3(0, 2.2, 0);
+    }
+
+    const size = bounds.getSize(new THREE.Vector3());
+    const worldHeadPoint = new THREE.Vector3(
+      0,
+      bounds.max.y + Math.max(OVERLAY_HEAD_PADDING, size.y * 0.02),
+      0,
+    );
+    return group.worldToLocal(worldHeadPoint);
   }
 
   /** Update target position for smooth interpolation */
@@ -215,6 +252,8 @@ export class LobsterManager {
 
   /** Remove a lobster from the scene */
   remove(agentId: string): void {
+    this.pendingCreates.delete(agentId);
+    this.pendingEntries.delete(agentId);
     const entry = this.lobsters.get(agentId);
     if (entry) {
       // Dispose animation mixer

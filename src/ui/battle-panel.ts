@@ -364,6 +364,7 @@ export function setupBattlePanel(resolveName: (agentId: string) => string): Batt
             startedAt: event.timestamp,
             updatedAt: event.timestamp,
             stamina: event.stamina ? { ...event.stamina } : undefined,
+            turnDeadline: event.turnDeadline,
           });
           addRecent(formatRecent(event), "start");
           break;
@@ -391,7 +392,7 @@ export function setupBattlePanel(resolveName: (agentId: string) => string): Batt
             lastIntents: nextIntents,
             lastDamage: current?.lastDamage,
             stamina: event.stamina ? { ...event.stamina } : current?.stamina,
-            turnDeadline: event.timestamp ? current?.turnDeadline : undefined,
+            turnDeadline: event.turnDeadline ?? current?.turnDeadline,
           });
           break;
         }
@@ -412,6 +413,7 @@ export function setupBattlePanel(resolveName: (agentId: string) => string): Batt
             lastDamage: event.damage,
             lastReadBonus: event.readBonus ? { ...event.readBonus } : undefined,
             lastTimedOut: event.timedOut ? [...event.timedOut] : undefined,
+            turnDeadline: event.turnDeadline,
           });
           addRecent(formatRecent(event), "round");
           break;
@@ -435,6 +437,8 @@ export function setupBattlePanel(resolveName: (agentId: string) => string): Batt
         pending: [...s.pending],
         startedAt: s.startedAt,
         updatedAt: s.updatedAt,
+        stamina: s.stamina ? { ...s.stamina } : undefined,
+        turnDeadline: s.turnDeadline,
       }));
     },
 

@@ -4,9 +4,10 @@ import type {
   BattleIntent,
   BattleMessage,
   BattleStateSummary,
+  RuntimeBattleState,
 } from "./types.js";
+import { BATTLE_RANGE } from "./types.js";
 
-const BATTLE_START_RANGE = 12;
 const MAX_HP = 100;
 const MAX_STAMINA = 100;
 const TURN_TIMEOUT_MS = 30_000;
@@ -80,6 +81,92 @@ export class BattleManager {
     return battles;
   }
 
+  exportRuntimeState(): RuntimeBattleState[] {
+    return Array.from(this.battles.values())
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((battle) => ({
+        battleId: battle.battleId,
+        participants: [...battle.participants] as [string, string],
+        hp: { ...battle.hp },
+        power: { ...battle.power },
+        stamina: { ...battle.stamina },
+        intents: { ...battle.intents },
+        intentStreak: {
+          [battle.participants[0]]: { ...battle.intentStreak[battle.participants[0]] },
+          [battle.participants[1]]: { ...battle.intentStreak[battle.participants[1]] },
+        },
+        turn: battle.turn,
+        startedAt: battle.startedAt,
+        updatedAt: battle.updatedAt,
+        turnStartedAt: battle.turnStartedAt,
+        truceProposals: Array.from(battle.truceProposals),
+      }));
+  }
+
+  restoreRuntimeState(battles: RuntimeBattleState[] | null | undefined): void {
+    this.reset();
+    if (!Array.isArray(battles)) return;
+
+    let nextBattleIdFloor = 1;
+
+    for (const rawBattle of battles) {
+      const participants = Array.isArray(rawBattle.participants)
+        ? rawBattle.participants
+        : [];
+      const [attackerIdRaw, defenderIdRaw] = participants;
+      const attackerId = typeof attackerIdRaw === "string" ? attackerIdRaw.trim() : "";
+      const defenderId = typeof defenderIdRaw === "string" ? defenderIdRaw.trim() : "";
+      if (!attackerId || !defenderId || attackerId === defenderId) continue;
+      if (this.agentToBattle.has(attackerId) || this.agentToBattle.has(defenderId)) continue;
+
+      const battleId = typeof rawBattle.battleId === "string" ? rawBattle.battleId.trim() : "";
+      if (!battleId || this.battles.has(battleId)) continue;
+
+      const participantPair: [string, string] = [attackerId, defenderId];
+      const battle: ActiveBattle = {
+        battleId,
+        participants: participantPair,
+        hp: this.restoreNumberRecord(rawBattle.hp, participantPair, MAX_HP, (value) => Math.max(0, Math.min(MAX_HP, Math.round(value)))),
+        power: this.restoreNumberRecord(rawBattle.power, participantPair, 1, (value) => this.normalizePower(value)),
+        stamina: this.restoreNumberRecord(
+          rawBattle.stamina,
+          participantPair,
+          MAX_STAMINA,
+          (value) => Math.max(0, Math.min(MAX_STAMINA, Math.round(value))),
+        ),
+        intents: this.restoreIntentRecord(rawBattle.intents, participantPair),
+        intentStreak: {
+          [attackerId]: this.restoreIntentStreak(rawBattle.intentStreak?.[attackerId]),
+          [defenderId]: this.restoreIntentStreak(rawBattle.intentStreak?.[defenderId]),
+        },
+        turn: Number.isFinite(rawBattle.turn) ? Math.max(1, Math.floor(rawBattle.turn)) : 1,
+        startedAt: Number.isFinite(rawBattle.startedAt) ? Math.max(0, Math.floor(rawBattle.startedAt)) : 0,
+        updatedAt: Number.isFinite(rawBattle.updatedAt) ? Math.max(0, Math.floor(rawBattle.updatedAt)) : 0,
+        turnStartedAt: Number.isFinite(rawBattle.turnStartedAt)
+          ? Math.max(0, Math.floor(rawBattle.turnStartedAt))
+          : 0,
+        truceProposals: new Set(
+          Array.isArray(rawBattle.truceProposals)
+            ? rawBattle.truceProposals.filter((agentId): agentId is string => participantPair.includes(agentId))
+            : [],
+        ),
+      };
+
+      this.battles.set(battleId, battle);
+      this.agentToBattle.set(attackerId, battleId);
+      this.agentToBattle.set(defenderId, battleId);
+      nextBattleIdFloor = Math.max(nextBattleIdFloor, this.getNextBattleIdFloor(battleId));
+    }
+
+    this.nextBattleId = nextBattleIdFloor;
+  }
+
+  reset(): void {
+    this.battles.clear();
+    this.agentToBattle.clear();
+    this.nextBattleId = 1;
+  }
+
   startBattle(
     attackerId: string,
     defenderId: string,
@@ -104,10 +191,10 @@ export class BattleManager {
     const dx = attackerPos.x - defenderPos.x;
     const dz = attackerPos.z - defenderPos.z;
     const dist = Math.sqrt(dx * dx + dz * dz);
-    if (dist > BATTLE_START_RANGE) {
+    if (dist > BATTLE_RANGE) {
       return {
         ok: false,
-        error: `Target is too far away (${dist.toFixed(1)} > ${BATTLE_START_RANGE})`,
+        error: `Target is too far away (${dist.toFixed(1)} > ${BATTLE_RANGE})`,
       };
     }
 
@@ -157,6 +244,7 @@ export class BattleManager {
       turn: 1,
       hp: { ...hp },
       stamina: { ...stamina },
+      turnDeadline: battle.turnStartedAt + TURN_TIMEOUT_MS,
       summary: `${attackerId} challenged ${defenderId}. Turn 1 started.`,
       timestamp,
     };
@@ -203,6 +291,7 @@ export class BattleManager {
       turn: battle.turn,
       hp: { ...battle.hp },
       stamina: { ...battle.stamina },
+      turnDeadline: battle.turnStartedAt + TURN_TIMEOUT_MS,
       actorId: agentId,
       intent: effectiveIntent,
       summary: forced
@@ -267,6 +356,7 @@ export class BattleManager {
       turn: battle.turn,
       hp: { ...battle.hp },
       stamina: { ...battle.stamina },
+      turnDeadline: battle.turnStartedAt + TURN_TIMEOUT_MS,
       summary: `${agentId} proposes a truce. ${opponent} can accept with truce or keep fighting.`,
       timestamp,
     };
@@ -355,6 +445,7 @@ export class BattleManager {
           turn: battle.turn,
           hp: { ...battle.hp },
           stamina: { ...battle.stamina },
+          turnDeadline: battle.turnStartedAt + TURN_TIMEOUT_MS,
           timedOut,
           summary: `Turn ${battle.turn} timed out. ${timedOut.join(", ")} auto-guarded.`,
           timestamp,
@@ -436,6 +527,7 @@ export class BattleManager {
       (critAttackers.includes(b) ? " (CRIT)" : "") +
       `. HP ${a}:${battle.hp[a]} ${b}:${battle.hp[b]}` +
       ` | STA ${a}:${battle.stamina[a]} ${b}:${battle.stamina[b]}`;
+    const nextTurnDeadline = timestamp + TURN_TIMEOUT_MS;
 
     const roundEvent: BattleMessage = {
       worldType: "battle",
@@ -450,6 +542,7 @@ export class BattleManager {
       intents: { [a]: intentA, [b]: intentB },
       readBonus: Object.keys(readBonus).length > 0 ? readBonus : undefined,
       criticalHits: critAttackers.length > 0 ? critAttackers : undefined,
+      turnDeadline: nextTurnDeadline,
       summary: roundSummary,
       timestamp,
     };
@@ -612,6 +705,62 @@ export class BattleManager {
   private hasTurnReady(battle: ActiveBattle): boolean {
     const [a, b] = battle.participants;
     return Boolean(battle.intents[a] && battle.intents[b]);
+  }
+
+  private restoreNumberRecord(
+    source: Record<string, number> | undefined,
+    participants: [string, string],
+    fallback: number,
+    normalize: (value: number) => number,
+  ): Record<string, number> {
+    const [a, b] = participants;
+    return {
+      [a]: this.restoreNumberValue(source?.[a], fallback, normalize),
+      [b]: this.restoreNumberValue(source?.[b], fallback, normalize),
+    };
+  }
+
+  private restoreNumberValue(
+    value: number | undefined,
+    fallback: number,
+    normalize: (value: number) => number,
+  ): number {
+    return Number.isFinite(value) ? normalize(Number(value)) : fallback;
+  }
+
+  private restoreIntentRecord(
+    source: Partial<Record<string, BattleIntent>> | undefined,
+    participants: [string, string],
+  ): Partial<Record<string, BattleIntent>> {
+    const intents: Partial<Record<string, BattleIntent>> = {};
+    for (const participant of participants) {
+      const intent = source?.[participant];
+      if (this.isBattleIntent(intent)) {
+        intents[participant] = intent;
+      }
+    }
+    return intents;
+  }
+
+  private restoreIntentStreak(
+    source: { intent: BattleIntent | null; count: number } | undefined,
+  ): IntentStreak {
+    const intent = source?.intent;
+    return {
+      intent: this.isBattleIntent(intent) ? intent : null,
+      count: Number.isFinite(source?.count) ? Math.max(0, Math.floor(source!.count)) : 0,
+    };
+  }
+
+  private isBattleIntent(value: unknown): value is BattleIntent {
+    return value === "approach" || value === "strike" || value === "guard" || value === "feint" || value === "retreat";
+  }
+
+  private getNextBattleIdFloor(battleId: string): number {
+    const match = /^battle-(\d+)$/.exec(battleId);
+    if (!match) return 1;
+    const parsed = Number(match[1]);
+    return Number.isFinite(parsed) ? Math.max(1, parsed + 1) : 1;
   }
 
   private finishBattle(battle: ActiveBattle): void {

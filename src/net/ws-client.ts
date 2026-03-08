@@ -1,5 +1,19 @@
 type Handler = (data: unknown) => void;
 
+interface QueuedOutboundMessage {
+  raw: string;
+  type: string | null;
+}
+
+const MAX_OUTBOUND_QUEUE = 128;
+const REPLACEABLE_QUEUE_TYPES = new Set([
+  "follow",
+  "requestBattles",
+  "requestProfiles",
+  "requestRoomInfo",
+  "viewport",
+]);
+
 /**
  * WebSocket client with auto-reconnection.
  * Connects to the single world server through the local /ws endpoint.
@@ -10,7 +24,7 @@ export class WSClient {
   private reconnectDelay = 1000;
   private maxReconnectDelay = 10000;
   private url: string;
-  private outboundQueue: string[] = [];
+  private outboundQueue: QueuedOutboundMessage[] = [];
 
   constructor() {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -35,7 +49,10 @@ export class WSClient {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(raw);
     } else {
-      this.outboundQueue.push(raw);
+      this.enqueueOutboundMessage({
+        raw,
+        type: typeof msg.type === "string" ? msg.type : null,
+      });
     }
   }
 
@@ -71,8 +88,8 @@ export class WSClient {
       console.log("[ws] Connected to world server");
       this.reconnectDelay = 1000;
       // Flush any messages buffered while disconnected
-      for (const raw of this.outboundQueue) {
-        this.ws!.send(raw);
+      for (const queued of this.outboundQueue) {
+        this.ws!.send(queued.raw);
       }
       this.outboundQueue.length = 0;
       this.emit("connected", {});
@@ -115,6 +132,17 @@ export class WSClient {
       this.reconnectDelay * 1.5,
       this.maxReconnectDelay
     );
+  }
+
+  private enqueueOutboundMessage(message: QueuedOutboundMessage): void {
+    if (message.type && REPLACEABLE_QUEUE_TYPES.has(message.type)) {
+      this.outboundQueue = this.outboundQueue.filter((queued) => queued.type !== message.type);
+    }
+
+    this.outboundQueue.push(message);
+    if (this.outboundQueue.length > MAX_OUTBOUND_QUEUE) {
+      this.outboundQueue.splice(0, this.outboundQueue.length - MAX_OUTBOUND_QUEUE);
+    }
   }
 
   private emit(type: string, data: unknown): void {
